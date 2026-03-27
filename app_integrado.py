@@ -781,7 +781,7 @@ def render_methodology_tab():
             "2) Vá em **Resultados** para ver os perfis e um radar com os 5 pilares."
             "3) O app calcula automaticamente o **Indicative rating level** pela Tabela 1, e você aplica notches/uplift."
         )
-    elif page == "Economic":
+    elif method_page == "Economic":
         st.title("Economic assessment")
     
         st.markdown("#### 1) Income level (GDP per capita) → score inicial")
