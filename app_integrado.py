@@ -1141,8 +1141,7 @@ def render_methodology_tab():
         st.session_state["indicative"] = indicative_lower
         st.session_state["final_rating"] = final_rating
         st.metric("Final rating", final_rating)
-        st.write(f"Notch: **{notch_adj:+d}**  
-LC uplift: **+{lc_uplift}**")
+        st.write(f"Notch: **{notch_adj:+d}** LC uplift: **+{lc_uplift}**")
         st.markdown("---")
         st.subheader("Exportar inputs")
         st.text_area("Notas/justificativas (opcional)", key="notes", height=120)
