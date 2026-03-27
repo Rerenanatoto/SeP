@@ -777,12 +777,9 @@ def render_methodology_tab():
                 st.info("Imagem da matriz não encontrada em assets/ (opcional).")
         st.markdown("---")
         st.subheader("Como usar")
-        st.markdown(
-            "1) Vá em cada assessment e preencha os inputs.
-"
-            "2) Vá em **Resultados** para ver os perfis e um radar com os 5 pilares.
-"
-            "3) O app calcula automaticamente o **Indicative rating level** pela Tabela 1, e você aplica notches/uplift."
+        st.markdown("1) Vá em cada assessment e preencha os inputs."
+                    "2) Vá em **Resultados** para ver os perfis e um radar com os 5 pilares."
+                    "3) O app calcula automaticamente o **Indicative rating level** pela Tabela 1, e você aplica notches/uplift."
         )
 
     elif method_page == "Economic":
