@@ -395,8 +395,7 @@ def radar(scores: dict):
 
 
 def bullets(items):
-    return "
-".join([f"- {x}" for x in items])
+    return "".join([f"- {x}" for x in items])
 
 
 def download_payload():
