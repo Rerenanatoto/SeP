@@ -1085,8 +1085,7 @@ def render_methodology_tab():
         with st.expander("Ver critérios do Table 2 (nível selecionado)", expanded=False):
             st.markdown("**Effectiveness, stability, and predictability of policymaking, political institutions, and civil society**")
             st.markdown(bullets(INST_TABLE2[init_inst]["effectiveness"]))
-            st.markdown("
-**Transparency and accountability of institutions, data, and processes**")
+            st.markdown("**Transparency and accountability of institutions, data, and processes**")
             st.markdown(bullets(INST_TABLE2[init_inst]["transparency"]))
         st.markdown("#### Ajustes")
         debt_culture_risk = st.checkbox("Risco de debt payment culture (cap para 6)", value=False, key="inst_debt_culture")
