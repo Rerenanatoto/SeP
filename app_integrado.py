@@ -993,7 +993,7 @@ def render_methodology_tab():
         st.metric("Fiscal assessment (average of the two segments)", fmt_score(fiscal_final))
         st.session_state["fiscal"] = float(fiscal_final)
 
-        elif method_page == "Monetary":
+    elif method_page == "Monetary":
         st.title("Monetary assessment")
         st.caption(
             "Cálculo baseado nas Tables 8A e 8B, com combinação de 40% para exchange-rate regime "
