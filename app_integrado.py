@@ -994,126 +994,160 @@ def render_methodology_tab():
         st.session_state["fiscal"] = float(fiscal_final)
 
     elif method_page == "Monetary":
-        st.title("Monetary assessment")
-        st.caption("Cálculo baseado nas Tables 8A e 8B, com combinação de 40% para exchange-rate regime e 60% para monetary policy credibility, além dos ajustes negativos previstos na metodologia.")
-        st.markdown("## 1) Exchange-rate regime")
-        c1, c2 = st.columns([1.2, 0.8])
-        with c1:
-            exr_score = st.selectbox(
-                "Exchange-rate regime – initial assessment",
-                options=[row["Score"] for row in MONETARY_TABLE8A],
-                index=1,
-                key="mon_exr_score",
-                format_func=lambda x: next(row["Exchange-rate regime"] for row in MONETARY_TABLE8A if row["Score"] == x),
-            )
-        with c2:
-            st.metric("Exchange-rate regime score", exr_score)
-        img = ASSETS_DIR / "page_27_img_01.png"
-        with st.expander("Ver Tabela 8A (imagem do PDF)", expanded=False):
-            if img.exists(): show_image(img)
-            else: st.info("Imagem da Tabela 8A não encontrada em assets/.")
-        st.markdown("---")
-        st.markdown("## 2) Monetary policy credibility")
+    st.title("Monetary assessment")
+    st.caption(
+        "Cálculo baseado nas Tables 8A e 8B, com combinação de 40% para exchange-rate regime "
+        "e 60% para monetary policy credibility, além dos ajustes negativos previstos na metodologia."
+    )
 
-        def build_mon_cred_option_blocks(score: int):
-            crit = MONETARY_TABLE8B[score]
-            intro = "All or most of the following factors apply" if score in [1, 2, 3, 4] else "Any of the following factors apply"
-            factors = [
-                crit["monetary_authority_independence"],
-                crit["monetary_policy_tools_and_effectiveness"],
-                crit["price_stability"],
-                crit["lender_of_last_resort"],
-                crit["local_financial_system_and_capital_markets"],
-            ]
-            factors = [f for f in factors if f and str(f).strip()]
-            return intro, factors
+    st.markdown("## 1) Exchange-rate regime")
+    c1, c2 = st.columns([1.2, 0.8])
 
-        def set_mon_cred(score: int):
-            st.session_state["mon_cred_score"] = score
+    with c1:
+        exr_score = st.selectbox(
+            "Exchange-rate regime – initial assessment",
+            options=[row["Score"] for row in MONETARY_TABLE8A],
+            index=1,
+            key="mon_exr_score",
+            format_func=lambda x: next(
+                row["Exchange-rate regime"]
+                for row in MONETARY_TABLE8A
+                if row["Score"] == x
+            ),
+        )
+    with c2:
+        st.metric("Exchange-rate regime score", exr_score)
 
-        if "mon_cred_score" not in st.session_state:
-            st.session_state["mon_cred_score"] = 3
+    img = ASSETS_DIR / "page_27_img_01.png"
+    with st.expander("Ver Tabela 8A (imagem do PDF)", expanded=False):
+        if img.exists():
+            show_image(img)
+        else:
+            st.info("Imagem da Tabela 8A não encontrada em assets/.")
 
-        c1, c2 = st.columns([1.55, 0.45])
-        with c1:
-            with st.expander("Selecionar escala de credibilidade monetária", expanded=True):
-                for s in range(1, 7):
-                    selected = int(st.session_state.get("mon_cred_score", 3)) == s
-                    intro, factors = build_mon_cred_option_blocks(s)
-                    accent = "#2563eb" if selected else "#d1d5db"
-                    bg = "#eff6ff" if selected else "#ffffff"
-                    title_color = "#1d4ed8" if selected else "#111827"
-                    badge_bg = "#dbeafe" if selected else "#f3f4f6"
-                    badge_color = "#1d4ed8" if selected else "#374151"
-                    shadow = "0 10px 24px rgba(37,99,235,0.10)" if selected else "0 2px 8px rgba(0,0,0,0.04)"
-                    button_label = "Selecionado" if selected else "Escolher"
-                    button_kind = "primary" if selected else "secondary"
-                    bullet_items = "".join([f"<li>{factor}</li>" for factor in factors])
-                    head1, head2 = st.columns([0.78, 0.22], gap="small")
-                    with head1:
-                        st.markdown(f"""
-                        <div style="margin:0 0 -0.15rem 0; padding:0.9rem 1rem 0.15rem 1rem; border-radius:16px 16px 0 0; border:1px solid {accent}; border-bottom:none; background:{bg}; box-shadow:{shadow};">
-                          <div style="display:flex; align-items:center; gap:0.55rem;">
-                            <div style="font-weight:800; color:{title_color}; font-size:1rem;">{s}</div>
-                            <div style="padding:0.12rem 0.48rem; border-radius:999px; background:{badge_bg}; color:{badge_color}; font-size:0.78rem; font-weight:700;">{MONETARY_TABLE8B_SUMMARY[s].split('–', 1)[1].strip()}</div>
-                          </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    with head2:
-                        if st.button(button_label, key=f"mon_cred_btn_{s}", use_container_width=True, type=button_kind):
-                            set_mon_cred(s)
-                            st.rerun()
-                    st.markdown(f"""
-                    <div style="margin:0 0 0.95rem 0; padding:0.2rem 1rem 0.95rem 1rem; border-radius:0 0 16px 16px; border:1px solid {accent}; border-top:none; background:{bg}; box-shadow:{shadow};">
-                      <div style="font-size:0.87rem; line-height:1.35; color:#374151; margin-bottom:0.45rem;"><strong>{intro}</strong></div>
-                      <ul style="margin:0.1rem 0 0 1.1rem; padding:0; color:#4b5563; font-size:0.84rem; line-height:1.38;">{bullet_items}</ul>
-                    </div>
-                    """, unsafe_allow_html=True)
-        cred_score = int(st.session_state["mon_cred_score"])
-        with c2:
-            st.metric("Monetary policy credibility score", cred_score)
+    st.markdown("---")
+    st.markdown("## 2) Monetary policy credibility")
+
+    def build_mon_cred_option_blocks(score: int):
+        crit = MONETARY_TABLE8B[score]
+        intro = (
+            "All or most of the following factors apply"
+            if score in [1, 2, 3, 4]
+            else "Any of the following factors apply"
+        )
+
+        factors = [
+            crit["monetary_authority_independence"],
+            crit["monetary_policy_tools_and_effectiveness"],
+            crit["price_stability"],
+            crit["lender_of_last_resort"],
+            crit["local_financial_system_and_capital_markets"],
+        ]
+        factors = [f for f in factors if f and str(f).strip()]
+        return intro, factors
+
+    cred_score = st.selectbox(
+        "Escolha o nível de monetary policy credibility conforme Table 8B",
+        [MONETARY_TABLE8B_SUMMARY[i] for i in [1, 2, 3, 4, 5, 6]],
+        index=2,
+        key="mon_cred_choice",
+    )
+
+    cred_score = int(str(cred_score).split("–")[0].strip())
+
+    with st.expander("Ver fatores do nível selecionado", expanded=False):
+        intro, factors = build_mon_cred_option_blocks(cred_score)
+        st.markdown(f"**{intro}**")
+        for factor in factors:
+            st.markdown(f"- {factor}")
+
+    c1, c2 = st.columns([1.55, 0.45])
+    with c1:
         img = ASSETS_DIR / "page_28_img_01.png"
         with st.expander("Ver Tabela 8B (imagem do PDF)", expanded=False):
-            if img.exists(): show_image(img)
-            else: st.info("Imagem da Tabela 8B não encontrada em assets/.")
-        initial_monetary = 0.4 * float(exr_score) + 0.6 * float(cred_score)
-        st.markdown("### Initial monetary assessment")
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Exchange-rate regime (40%)", exr_score)
-        m2.metric("Credibility (60%)", cred_score)
-        m3.metric("Initial assessment", f"{initial_monetary:.1f}")
-        st.markdown("---")
-        st.markdown("## 3) Negative adjustments")
-        with st.expander("Ajustes negativos aplicáveis ao sovereign (máximo de 2 categorias)", expanded=False):
-            mon_neg_1 = st.checkbox("Weak or significantly weakening transmission mechanisms", key="mon_neg_transmission")
-            mon_neg_2 = st.checkbox("Dollarization: resident deposits or loans in foreign currency exceed roughly 50% of total", key="mon_neg_dollarization")
-            mon_neg_3 = st.checkbox("Extensive exchange restrictions (for example, IMF Article VIII issues)", key="mon_neg_exchange_restrictions")
-        base_neg_raw = int(mon_neg_1) + int(mon_neg_2) + int(mon_neg_3)
-        base_neg = min(2, base_neg_raw)
-        st.markdown("---")
-        st.markdown("## 4) Sovereigns in monetary unions")
-        in_monetary_union = st.checkbox("Sovereign is part of a monetary union", key="mon_in_monetary_union")
-        union_adj_raw = 0
-        union_adj = 0
-        if in_monetary_union:
-            dominant_member = st.checkbox("Economy accounts for more than 50% of the monetary union GDP (do not apply the two union-specific adjustments)", key="mon_union_dominant_member")
-            if not dominant_member:
-                with st.expander("Ajustes específicos de membros de monetary union (máximo de 2 categorias)", expanded=False):
-                    mu_neg_1 = st.checkbox("Member states generally have less flexibility than sovereigns with their own central bank", key="mon_union_less_flexibility")
-                    mu_neg_2 = st.checkbox("Economy is unsynchronized with the monetary union / the union stance may be inappropriate for this sovereign", key="mon_union_unsynchronized")
-                union_adj_raw = int(mu_neg_1) + int(mu_neg_2)
-                union_adj = min(2, union_adj_raw)
+            if img.exists():
+                show_image(img)
             else:
-                st.info("Como o país representa mais de 50% do PIB da união monetária, os dois ajustes específicos da união monetária não são aplicados.")
-        st.markdown("---")
-        final_monetary = min(6.0, initial_monetary + float(base_neg) + float(union_adj))
-        st.markdown("## 5) Final monetary assessment")
-        f1, f2, f3, f4 = st.columns(4)
-        f1.metric("Initial assessment", f"{initial_monetary:.1f}")
-        f2.metric("Negative adjustments", f"+{base_neg}")
-        f3.metric("Monetary-union adjustments", f"+{union_adj}")
-        f4.metric("Monetary assessment (final)", fmt_score(final_monetary))
-        st.session_state["monetary"] = float(final_monetary)
+                st.info("Imagem da Tabela 8B não encontrada em assets/.")
+    with c2:
+        st.metric("Monetary policy credibility score", cred_score)
+
+    initial_monetary = 0.4 * float(exr_score) + 0.6 * float(cred_score)
+
+    st.markdown("### Initial monetary assessment")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Exchange-rate regime (40%)", exr_score)
+    m2.metric("Credibility (60%)", cred_score)
+    m3.metric("Initial assessment", f"{initial_monetary:.1f}")
+
+    st.markdown("---")
+    st.markdown("## 3) Negative adjustments")
+    with st.expander(
+        "Ajustes negativos aplicáveis ao sovereign (máximo de 2 categorias)",
+        expanded=False,
+    ):
+        mon_neg_1 = st.checkbox(
+            "Weak or significantly weakening transmission mechanisms",
+            key="mon_neg_transmission",
+        )
+        mon_neg_2 = st.checkbox(
+            "Dollarization: resident deposits or loans in foreign currency exceed roughly 50% of total",
+            key="mon_neg_dollarization",
+        )
+        mon_neg_3 = st.checkbox(
+            "Extensive exchange restrictions (for example, IMF Article VIII issues)",
+            key="mon_neg_exchange_restrictions",
+        )
+
+    base_neg_raw = int(mon_neg_1) + int(mon_neg_2) + int(mon_neg_3)
+    base_neg = min(2, base_neg_raw)
+
+    st.markdown("---")
+    st.markdown("## 4) Sovereigns in monetary unions")
+    in_monetary_union = st.checkbox(
+        "Sovereign is part of a monetary union",
+        key="mon_in_monetary_union",
+    )
+
+    union_adj_raw = 0
+    union_adj = 0
+
+    if in_monetary_union:
+        dominant_member = st.checkbox(
+            "Economy accounts for more than 50% of the monetary union GDP (do not apply the two union-specific adjustments)",
+            key="mon_union_dominant_member",
+        )
+        if not dominant_member:
+            with st.expander(
+                "Ajustes específicos de membros de monetary union (máximo de 2 categorias)",
+                expanded=False,
+            ):
+                mu_neg_1 = st.checkbox(
+                    "Member states generally have less flexibility than sovereigns with their own central bank",
+                    key="mon_union_less_flexibility",
+                )
+                mu_neg_2 = st.checkbox(
+                    "Economy is unsynchronized with the monetary union / the union stance may be inappropriate for this sovereign",
+                    key="mon_union_unsynchronized",
+                )
+            union_adj_raw = int(mu_neg_1) + int(mu_neg_2)
+            union_adj = min(2, union_adj_raw)
+        else:
+            st.info(
+                "Como o país representa mais de 50% do PIB da união monetária, os dois ajustes específicos da união monetária não são aplicados."
+            )
+
+    st.markdown("---")
+    final_monetary = min(6.0, initial_monetary + float(base_neg) + float(union_adj))
+
+    st.markdown("## 5) Final monetary assessment")
+    f1, f2, f3, f4 = st.columns(4)
+    f1.metric("Initial assessment", f"{initial_monetary:.1f}")
+    f2.metric("Negative adjustments", f"+{base_neg}")
+    f3.metric("Monetary-union adjustments", f"+{union_adj}")
+    f4.metric("Monetary assessment (final)", fmt_score(final_monetary))
+
+    st.session_state["monetary"] = float(final_monetary)
 
     elif method_page == "External":
         st.title("External assessment")
