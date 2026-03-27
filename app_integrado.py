@@ -781,130 +781,130 @@ def render_methodology_tab():
             "2) Vá em **Resultados** para ver os perfis e um radar com os 5 pilares."
             "3) O app calcula automaticamente o **Indicative rating level** pela Tabela 1, e você aplica notches/uplift."
         )
-elif page == "Economic":
-    st.title("Economic assessment")
-
-    st.markdown("#### 1) Income level (GDP per capita) → score inicial")
-    gdppc = st.number_input(
-        "GDP per capita (US$) – ano corrente",
-        min_value=0.0,
-        value=10000.0,
-        step=100.0,
-        key="eco_gdppc",
-    )
-
-    init_score = init_economic_from_gdppc(gdppc)
-
-    df_thr = pd.DataFrame(
-        [
-            {"Faixa (US$)": label, "Initial economic assessment": score}
-            for _, score, label in GDP_PC_THRESHOLDS
-        ]
-    )
-    st_dataframe_compat(df_thr, use_container_width=True, hide_index=True)
-    st.metric("Score inicial (Income level)", init_score)
-
-    st.markdown("#### 2) Ajustes (até ±2 categorias no total)")
-
-    bucket = pick_growth_bucket(init_score)
-    median_growth = MEDIAN_GROWTH_BY_INIT[bucket]
-
-    st.caption(
-        f"Referência: mediana de crescimento real per capita (10 anos) para init={bucket}: {median_growth:.1f}%"
-    )
-
-    trend = st.number_input(
-        "Real GDP per capita trend growth (10y, %) – sua estimativa",
-        value=median_growth,
-        step=0.1,
-        key="eco_trend",
-    )
-
-    # ============================================================
-    # Ajuste AUTOMÁTICO por growth prospects
-    # Regra:
-    # - bucket 1-2: melhora se >= mediana + 0.7 ; piora se < mediana - 0.7
-    # - bucket 3:   melhora se >= mediana + 0.7 ; piora se < mediana - 0.7
-    # - bucket 4-6: melhora se >= mediana + 0.7 ; piora se < mediana
-    # Ou seja, para bucket 4-6, abaixo de 2.7 já piora 1 categoria.
-    # ============================================================
-    if bucket == "4-6":
-        if trend >= median_growth + 0.7:
-            adj_growth_auto = -1
-        elif trend < median_growth:
-            adj_growth_auto = 1
-        else:
-            adj_growth_auto = 0
-    else:
-        if trend >= median_growth + 0.7:
-            adj_growth_auto = -1
-        elif trend < (median_growth - 0.7):
-            adj_growth_auto = 1
-        else:
-            adj_growth_auto = 0
-
-    c_auto1, c_auto2 = st.columns([1, 2])
-    with c_auto1:
-        st.metric("Ajuste automático por growth prospects", f"{adj_growth_auto:+d}")
-    with c_auto2:
+    elif page == "Economic":
+        st.title("Economic assessment")
+    
+        st.markdown("#### 1) Income level (GDP per capita) → score inicial")
+        gdppc = st.number_input(
+            "GDP per capita (US$) – ano corrente",
+            min_value=0.0,
+            value=10000.0,
+            step=100.0,
+            key="eco_gdppc",
+        )
+    
+        init_score = init_economic_from_gdppc(gdppc)
+    
+        df_thr = pd.DataFrame(
+            [
+                {"Faixa (US$)": label, "Initial economic assessment": score}
+                for _, score, label in GDP_PC_THRESHOLDS
+            ]
+        )
+        st_dataframe_compat(df_thr, use_container_width=True, hide_index=True)
+        st.metric("Score inicial (Income level)", init_score)
+    
+        st.markdown("#### 2) Ajustes (até ±2 categorias no total)")
+    
+        bucket = pick_growth_bucket(init_score)
+        median_growth = MEDIAN_GROWTH_BY_INIT[bucket]
+    
         st.caption(
-            "Para bucket 4-6, valores abaixo da mediana (2.7%) já geram piora de 1 categoria."
+            f"Referência: mediana de crescimento real per capita (10 anos) para init={bucket}: {median_growth:.1f}%"
         )
-
-    use_manual_growth_override = st.checkbox(
-        "Override manual do ajuste por growth prospects",
-        value=False,
-        key="eco_use_manual_growth_override",
-    )
-
-    if use_manual_growth_override:
-        adj_growth = st.selectbox(
-            "Ajuste manual por growth prospects",
-            options=[-1, 0, 1],
-            index=[-1, 0, 1].index(adj_growth_auto),
-            key="eco_adj_growth_manual",
-            help="-1 melhora 1 categoria; +1 piora 1 categoria.",
+    
+        trend = st.number_input(
+            "Real GDP per capita trend growth (10y, %) – sua estimativa",
+            value=median_growth,
+            step=0.1,
+            key="eco_trend",
         )
-    else:
-        adj_growth = adj_growth_auto
-
-    adj_concentration = st.selectbox(
-        "Ajuste por concentração/volatilidade (0 ou +1)",
-        options=[0, 1],
-        index=0,
-        key="eco_adj_conc",
-    )
-
-    adj_credit_bubble = st.selectbox(
-        "Ajuste por credit-bubble risk (0 ou +1)",
-        options=[0, 1],
-        index=0,
-        key="eco_adj_bubble",
-    )
-
-    adj_data = st.selectbox(
-        "Ajuste por inconsistência de dados (0 ou +1)",
-        options=[0, 1],
-        index=0,
-        key="eco_adj_data",
-    )
-
-    total_adj = adj_growth + adj_concentration + adj_credit_bubble + adj_data
-    total_adj = max(-2, min(2, total_adj))
-
-    final_score = clamp_score(init_score + total_adj)
-
-    st.markdown("---")
-    st.metric("Economic assessment (final)", final_score)
-    st.caption(
-        f"Growth prospects: {adj_growth:+d} | "
-        f"Concentração/volatilidade: {adj_concentration:+d} | "
-        f"Credit-bubble risk: {adj_credit_bubble:+d} | "
-        f"Inconsistência de dados: {adj_data:+d}"
-    )
-    st.caption(f"Total de ajuste aplicado (limitado a ±2): {total_adj:+d}")
-
-    st.session_state["economic"] = int(final_score)
+    
+        # ============================================================
+        # Ajuste AUTOMÁTICO por growth prospects
+        # Regra:
+        # - bucket 1-2: melhora se >= mediana + 0.7 ; piora se < mediana - 0.7
+        # - bucket 3:   melhora se >= mediana + 0.7 ; piora se < mediana - 0.7
+        # - bucket 4-6: melhora se >= mediana + 0.7 ; piora se < mediana
+        # Ou seja, para bucket 4-6, abaixo de 2.7 já piora 1 categoria.
+        # ============================================================
+        if bucket == "4-6":
+            if trend >= median_growth + 0.7:
+                adj_growth_auto = -1
+            elif trend < median_growth:
+                adj_growth_auto = 1
+            else:
+                adj_growth_auto = 0
+        else:
+            if trend >= median_growth + 0.7:
+                adj_growth_auto = -1
+            elif trend < (median_growth - 0.7):
+                adj_growth_auto = 1
+            else:
+                adj_growth_auto = 0
+    
+        c_auto1, c_auto2 = st.columns([1, 2])
+        with c_auto1:
+            st.metric("Ajuste automático por growth prospects", f"{adj_growth_auto:+d}")
+        with c_auto2:
+            st.caption(
+                "Para bucket 4-6, valores abaixo da mediana (2.7%) já geram piora de 1 categoria."
+            )
+    
+        use_manual_growth_override = st.checkbox(
+            "Override manual do ajuste por growth prospects",
+            value=False,
+            key="eco_use_manual_growth_override",
+        )
+    
+        if use_manual_growth_override:
+            adj_growth = st.selectbox(
+                "Ajuste manual por growth prospects",
+                options=[-1, 0, 1],
+                index=[-1, 0, 1].index(adj_growth_auto),
+                key="eco_adj_growth_manual",
+                help="-1 melhora 1 categoria; +1 piora 1 categoria.",
+            )
+        else:
+            adj_growth = adj_growth_auto
+    
+        adj_concentration = st.selectbox(
+            "Ajuste por concentração/volatilidade (0 ou +1)",
+            options=[0, 1],
+            index=0,
+            key="eco_adj_conc",
+        )
+    
+        adj_credit_bubble = st.selectbox(
+            "Ajuste por credit-bubble risk (0 ou +1)",
+            options=[0, 1],
+            index=0,
+            key="eco_adj_bubble",
+        )
+    
+        adj_data = st.selectbox(
+            "Ajuste por inconsistência de dados (0 ou +1)",
+            options=[0, 1],
+            index=0,
+            key="eco_adj_data",
+        )
+    
+        total_adj = adj_growth + adj_concentration + adj_credit_bubble + adj_data
+        total_adj = max(-2, min(2, total_adj))
+    
+        final_score = clamp_score(init_score + total_adj)
+    
+        st.markdown("---")
+        st.metric("Economic assessment (final)", final_score)
+        st.caption(
+            f"Growth prospects: {adj_growth:+d} | "
+            f"Concentração/volatilidade: {adj_concentration:+d} | "
+            f"Credit-bubble risk: {adj_credit_bubble:+d} | "
+            f"Inconsistência de dados: {adj_data:+d}"
+        )
+        st.caption(f"Total de ajuste aplicado (limitado a ±2): {total_adj:+d}")
+    
+        st.session_state["economic"] = int(final_score)
 
     elif method_page == "Fiscal":
         st.title("Fiscal assessment")
