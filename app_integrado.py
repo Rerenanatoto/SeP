@@ -12,6 +12,7 @@ import zipfile
 from openpyxl import Workbook
 from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.drawing.fill import ColorChoice
 
 st.set_page_config(page_title="S&P Methodology + SRI", layout="wide")
 
@@ -527,7 +528,9 @@ def sri_to_excel(df: pd.DataFrame) -> bytes:
         # Marcadores (bolinhas) em cada ponto da linha
         for s in lc.series:
             s.marker.symbol = 'circle'
-            s.marker.size   = 4
+            s.marker.size   = 10
+            s.marker.graphicalProperties.solidFill = "FFFFFF"   # branco = aparência de vazio
+            s.marker.graphicalProperties.line.solidFill = "auto" # borda na cor da linha
 
         # Eixo X: anos visiveis na base
         lc.x_axis.axPos          = 'b'
