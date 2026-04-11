@@ -413,6 +413,16 @@ def download_payload():
     }
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
+def to_excel_bytes(sheets_dict: dict) -> bytes:
+    """Converte um dicionário {nome_aba: DataFrame} em bytes de arquivo .xlsx."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for sheet_name, df in sheets_dict.items():
+            safe_name = sheet_name[:31]
+            df.to_excel(writer, sheet_name=safe_name, index=False)
+    return buf.getvalue()
+
+
 # ============================================================
 # Lógica SRI
 # ============================================================
@@ -704,6 +714,18 @@ def render_dashboard_tab(df: pd.DataFrame):
     st_dataframe_compat(rating_summary, use_container_width=True, hide_index=True)
 
 
+
+    # --- Download Excel ---
+    st.markdown("---")
+    excel_bytes = to_excel_bytes({"SRI-Dashboards": df.reset_index(drop=True)})
+    st.download_button(
+        label="⬇️ Baixar Dashboards (.xlsx)",
+        data=excel_bytes,
+        file_name="sri_dashboards.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_dashboard_xlsx",
+    )
+
 def render_table_tab(df: pd.DataFrame):
     st.subheader("Dados em tabela")
     if df.empty:
@@ -729,13 +751,25 @@ def render_table_tab(df: pd.DataFrame):
             .reset_index()
         )
     st_dataframe_compat(display_df, use_container_width=True, hide_index=True)
-    csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        "Baixar CSV da visualização atual",
-        data=csv_data,
-        file_name="bda_filtrado.csv",
-        mime="text/csv",
-    )
+    col_dl1, col_dl2 = st.columns(2)
+    with col_dl1:
+        csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "⬇️ Baixar CSV",
+            data=csv_data,
+            file_name="bda_filtrado.csv",
+            mime="text/csv",
+            key="dl_table_csv",
+        )
+    with col_dl2:
+        excel_bytes_table = to_excel_bytes({"SRI-Dados": display_df})
+        st.download_button(
+            label="⬇️ Baixar Excel (.xlsx)",
+            data=excel_bytes_table,
+            file_name="sri_dados.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_table_xlsx",
+        )
 
 # ============================================================
 # UI metodologia (agora dentro da 1ª aba)
@@ -743,7 +777,41 @@ def render_table_tab(df: pd.DataFrame):
 
 def render_methodology_tab():
     st.header("Metodologia")
-    method_page = st.radio(
+    # --- Download Excel Metodologia ---
+    metod_data = {
+        "Parâmetro": [
+            "Institutional", "Economic", "External",
+            "Fiscal", "Monetary",
+            "IE Profile", "FP Profile",
+            "Indicative Rating", "Notch Adj.", "LC Uplift",
+            "Final Rating", "Notas",
+        ],
+        "Valor": [
+            st.session_state.get("institutional", "—"),
+            st.session_state.get("economic", "—"),
+            st.session_state.get("external", "—"),
+            st.session_state.get("fiscal", "—"),
+            st.session_state.get("monetary", "—"),
+            st.session_state.get("profiles", {}).get("ie_profile", "—") if isinstance(st.session_state.get("profiles"), dict) else "—",
+            st.session_state.get("profiles", {}).get("fp_profile", "—") if isinstance(st.session_state.get("profiles"), dict) else "—",
+            st.session_state.get("indicative", "—"),
+            st.session_state.get("notch_adj", "—"),
+            st.session_state.get("lc_uplift", "—"),
+            st.session_state.get("final_rating", "—"),
+            st.session_state.get("notes", ""),
+        ],
+    }
+    df_metod = pd.DataFrame(metod_data)
+    excel_bytes_metod = to_excel_bytes({"Metodologia": df_metod})
+    st.download_button(
+        label="⬇️ Baixar Metodologia (.xlsx)",
+        data=excel_bytes_metod,
+        file_name="metodologia_sp.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_metod_xlsx",
+    )
+    st.markdown("---")
+        method_page = st.radio(
         "Seção da metodologia",
         ["Visão geral", "Economic", "Fiscal", "Monetary", "External", "Institutional", "Resultados"],
         horizontal=True,
