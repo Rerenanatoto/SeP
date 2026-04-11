@@ -419,7 +419,7 @@ def download_payload():
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
 # ============================================================
-# SRI -> Excel export (dados + graficos de linha)
+# SRI -> Excel export
 # ============================================================
 
 def _fix_strref_in_zip(buf):
@@ -518,13 +518,10 @@ def sri_to_excel(df: pd.DataFrame) -> bytes:
                         titles_from_data=True)
         lc.set_categories(Reference(ws, min_col=1, min_row=2, max_row=n_yr + 1))
 
-        # Marcadores (bolinhas sem preenchimento) em cada ponto
+        # Marcadores: apenas symbol e size — sem graphicalProperties (corrompe o XML)
         for s in lc.series:
             s.marker.symbol = 'circle'
             s.marker.size   = 4
-            # hollow marker: borda na cor da serie, sem preenchimento interno
-            s.marker.graphicalProperties.solidFill = 'FFFFFF'
-            s.marker.graphicalProperties.line.solidFill = 'auto'
 
         lc.x_axis.axPos          = 'b'
         lc.x_axis.delete         = False
