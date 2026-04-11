@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from openpyxl.chart import LineChart, RadarChart, Reference
+from openpyxl.chart import ScatterChart, RadarChart, Reference, Series
 from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="S&P Methodology + SRI", layout="wide")
@@ -421,24 +421,23 @@ def download_payload():
 # ============================================================
 
 def _sanitize_sheet_name(name: str, existing: list, max_len: int = 28) -> str:
-    """Sanitiza nome de aba Excel: remove chars inválidos, limita tamanho, evita duplicatas."""
-    safe = re.sub(r"[/\\?*\[\]:\']+", "_", name).strip()[:max_len]
+    """Sanitiza nome de aba Excel; evita duplicatas."""
+    safe = re.sub(r"[/\\?*\[\]:\']+", "_", str(name)).strip()[:max_len]
     if not safe:
         safe = "Aux"
-    candidate = safe
-    suffix = 2
+    candidate, suffix = safe, 2
     while candidate in existing:
         candidate = f"{safe[:max_len - 2]}_{suffix}"
         suffix += 1
     return candidate
 
 
-def _build_sri_line_charts(wb, df_s, sheet_name: str):
+def _build_sri_scatter_charts(wb, df_s, sheet_name: str):
     """
-    Cria um LineChart nativo por indicador em uma aba 'Graficos'.
-    - Abas auxiliares têm o nome do indicador (visíveis).
-    - Anos escritos como strings na coluna 1 → eixo X exibe corretamente.
-    - Linhas retas (smooth=False), com marcadores.
+    Cria um ScatterChart (lineMarker) por indicador.
+    - Eixo X = anos numéricos reais  → anos aparecem corretamente.
+    - Cada série = um país.
+    - Aba auxiliar nomeada com o indicador (visível).
     """
     cols = list(df_s.columns)
     if not all(c in cols for c in ["indicator", "country_name", "year_num", "value"]):
@@ -451,29 +450,29 @@ def _build_sri_line_charts(wb, df_s, sheet_name: str):
     if chart_ws_name in wb.sheetnames:
         chart_ws_name = f"Graf_{sheet_name[:10]}"
     chart_ws = wb.create_sheet(chart_ws_name)
-    chart_row = 1
     existing_sheets = list(wb.sheetnames)
+    chart_row = 1
 
     for ind in indicators:
         ind_df = df_s[df_s["indicator"] == ind].dropna(subset=["year_num", "value"])
         if ind_df.empty:
             continue
-        countries = sorted(ind_df["country_name"].dropna().unique().tolist())
+        countries   = sorted(ind_df["country_name"].dropna().unique().tolist())
         years_sorted = sorted(ind_df["year_num"].dropna().unique().tolist())
+        n_years     = len(years_sorted)
+        n_countries = len(countries)
 
-        # Nome da aba auxiliar = nome do indicador (sanitizado)
+        # Aba auxiliar: col1 = Ano (int), col2..N = valor por país
         aux_name = _sanitize_sheet_name(ind, existing_sheets)
         existing_sheets.append(aux_name)
         aux = wb.create_sheet(aux_name)
 
-        # Cabeçalho: Ano | País1 | País2 | ...
         aux.cell(row=1, column=1, value="Ano")
         for ci, country in enumerate(countries, start=2):
             aux.cell(row=1, column=ci, value=country[:28])
 
-        # Dados: anos como STRING → Excel trata como categorias e exibe no eixo X
         for ri, yr in enumerate(years_sorted, start=2):
-            aux.cell(row=ri, column=1, value=str(int(yr)))   # <-- string!
+            aux.cell(row=ri, column=1, value=int(yr))          # inteiro real
             for ci, country in enumerate(countries, start=2):
                 sv = ind_df[
                     (ind_df["year_num"] == yr) & (ind_df["country_name"] == country)
@@ -481,65 +480,54 @@ def _build_sri_line_charts(wb, df_s, sheet_name: str):
                 aux.cell(row=ri, column=ci,
                          value=round(float(sv.mean()), 4) if not sv.empty else None)
 
-        n_years = len(years_sorted)
-        n_countries = len(countries)
+        # ScatterChart com linhas + marcadores
+        sc = ScatterChart()
+        sc.scatterStyle = "lineMarker"
+        sc.style        = 10
+        sc.title        = ind[:50]
+        sc.y_axis.title = "Valor"
+        sc.x_axis.title = "Ano"
+        sc.width        = 22
+        sc.height       = 12
+        # Eixo X: inteiros (anos)
+        sc.x_axis.numFmt    = "0"
+        sc.x_axis.tickLblPos = "low"
 
-        # LineChart: linhas retas com marcadores, sem suavização
-        lc = LineChart()
-        lc.style = 10
-        lc.title = ind[:50]
-        lc.y_axis.title = "Valor"
-        lc.x_axis.title = "Ano"
-        lc.smooth = False       # linhas retas (sem curvas)
-        lc.width = 22
-        lc.height = 12
-
-        # Séries: uma por país (linha 1 = cabeçalho/título da série)
+        x_ref = Reference(aux, min_col=1, min_row=2, max_row=n_years + 1)
         for ci in range(2, n_countries + 2):
-            lc.add_data(
-                Reference(aux, min_col=ci, min_row=1, max_row=n_years + 1),
-                titles_from_data=True,
-            )
-
-        # Categorias = anos (col 1, linhas 2..n+1) — strings → aparecem no eixo X
-        lc.set_categories(Reference(aux, min_col=1, min_row=2, max_row=n_years + 1))
-
-        # Marcadores visíveis em cada ponto
-        from openpyxl.chart.series import SeriesLabel
-        for series in lc.series:
+            y_ref  = Reference(aux, min_col=ci, min_row=2, max_row=n_years + 1)
+            series = Series(y_ref, xvalues=x_ref,
+                            title=aux.cell(row=1, column=ci).value)
             series.smooth = False
             series.marker.symbol = "circle"
-            series.marker.size = 4
+            series.marker.size   = 4
+            sc.series.append(series)
 
-        # Eixo X: rótulos na parte inferior
-        lc.x_axis.tickLblPos = "low"
-
-        chart_ws.add_chart(lc, f"A{chart_row}")
-        chart_row += 23   # ~22 linhas por chart + 1 de margem
+        chart_ws.add_chart(sc, f"A{chart_row}")
+        chart_row += 23
 
 
 def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
     """
     Converte {nome_aba: DataFrame} em bytes .xlsx.
-    Se add_charts=True:
-      - SRI-Dashboards / SRI-Dados -> LineCharts por indicador (aba Graficos)
-      - Metodologia -> RadarChart, linhas sem preenchimento, escala 0-6 com números
+    add_charts=True:
+      - SRI-Dashboards / SRI-Dados → ScatterCharts (lineMarker) por indicador
+      - Metodologia → RadarChart padrão, verde, escala 0-6, pilares nos vértices
     """
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         for sheet_name, df_s in sheets_dict.items():
-            safe_name = sheet_name[:31]
-            df_s.to_excel(writer, sheet_name=safe_name, index=False)
+            df_s.to_excel(writer, sheet_name=sheet_name[:31], index=False)
 
         if add_charts:
             wb = writer.book
             for sheet_name, df_s in sheets_dict.items():
-                safe_name = sheet_name[:31]
-                cols = list(df_s.columns)
+                safe   = sheet_name[:31]
+                cols   = list(df_s.columns)
 
-                # ── METODOLOGIA: RadarChart sem preenchimento ──────────────────
-                if safe_name == "Metodologia" and "Parâmetro" in cols and "Valor" in cols:
-                    ws = wb[safe_name]
+                # ── METODOLOGIA: RadarChart verde, escala 0-6, pilares nos vértices ──
+                if safe == "Metodologia" and "Parâmetro" in cols and "Valor" in cols:
+                    ws = wb[safe]
                     pillar_params = ["Institutional", "Economic", "External",
                                      "Fiscal", "Monetary"]
                     param_col = df_s["Parâmetro"].tolist()
@@ -551,41 +539,52 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                                 break
 
                     if len(pillar_rows) == 5:
+                        # Dados aux em colunas D (pilar) e E (score)
                         ws["D1"] = "Pilar"
                         ws["E1"] = "Score"
-                        for ri, (pname, row_excel) in enumerate(
+                        for ri, (pname, rexcel) in enumerate(
                                 zip(pillar_params, pillar_rows), start=2):
                             ws[f"D{ri}"] = pname
-                            raw_val = ws[f"B{row_excel}"].value
                             try:
-                                ws[f"E{ri}"] = float(raw_val)
+                                ws[f"E{ri}"] = float(ws[f"B{rexcel}"].value)
                             except (TypeError, ValueError):
                                 ws[f"E{ri}"] = 0
 
-                        # type="standard" → linhas sem preenchimento
                         radar = RadarChart()
-                        radar.type = "standard"
+                        radar.type  = "standard"  # sem preenchimento
                         radar.style = 10
                         radar.title = "Perfil de Scores – S&P Metodologia"
-                        radar.y_axis.delete = False
-                        radar.y_axis.numFmt = "0"
-                        radar.y_axis.scaling.min = 0
-                        radar.y_axis.scaling.max = 6
-                        radar.y_axis.majorUnit = 1  # números 1,2,3,4,5,6 em cada anel
+                        # Escala 0-6 com números em cada anel
+                        radar.y_axis.delete    = False
+                        radar.y_axis.numFmt    = "0"
+                        radar.y_axis.scaling.min  = 0
+                        radar.y_axis.scaling.max  = 6
+                        radar.y_axis.majorUnit = 1
 
                         data_ref = Reference(ws, min_col=5, min_row=1, max_row=6)
                         cats_ref = Reference(ws, min_col=4, min_row=2, max_row=6)
                         radar.add_data(data_ref, titles_from_data=True)
                         radar.set_categories(cats_ref)
-                        radar.width = 14
-                        radar.height = 10
+
+                        # Cor verde para linha e marcador
+                        GREEN = "00B050"
+                        s = radar.series[0]
+                        s.graphicalProperties.line.solidFill      = GREEN
+                        s.graphicalProperties.line.width          = 20000   # ~1.5pt
+                        s.marker.symbol                            = "circle"
+                        s.marker.size                              = 5
+                        s.marker.graphicalProperties.solidFill    = GREEN
+                        s.marker.graphicalProperties.line.solidFill = GREEN
+
+                        radar.width  = 16
+                        radar.height = 12
                         ws.add_chart(radar, "D8")
 
-                # ── SRI: LineCharts por indicador ─────────────────────────────
-                elif safe_name in ("SRI-Dashboards", "SRI-Dados") and all(
+                # ── SRI: ScatterCharts por indicador ──────────────────────────
+                elif safe in ("SRI-Dashboards", "SRI-Dados") and all(
                     c in cols for c in ["indicator", "country_name", "year_num", "value"]
                 ):
-                    _build_sri_line_charts(wb, df_s, safe_name)
+                    _build_sri_scatter_charts(wb, df_s, safe)
 
     buf.seek(0)
     return buf.read()
@@ -882,7 +881,7 @@ def render_dashboard_tab(df: pd.DataFrame):
     st_dataframe_compat(rating_summary, use_container_width=True, hide_index=True)
 
 
-    # Download Excel com gráficos de linha nativos
+    # ── Download Excel com gráficos de linha ──────────────────────
     st.markdown("---")
     _dash_df = plot_df.reset_index(drop=True) if not plot_df.empty else df.reset_index(drop=True)
     _excel_dash = to_excel_bytes({"SRI-Dashboards": _dash_df}, add_charts=True)
@@ -946,7 +945,7 @@ def render_table_tab(df: pd.DataFrame):
 
 def render_methodology_tab():
     st.header("Metodologia")
-    # Download Excel com gráfico radar (linhas sem fill, escala 0-6 com números)
+    # ── Download Excel com gráfico radar ──────────────────────────
     _metod_data = {
         "Parâmetro": [
             "Institutional", "Economic", "External",
@@ -1510,7 +1509,7 @@ def render_methodology_tab():
         st.markdown("---")
         st.subheader("Exportar inputs")
         st.text_area("Notas/justificativas (opcional)", key="notes", height=120)
-        st.download_button("Baixar JSON com inputs", data=download_payload(), file_name="sep_inputs.json", mime="application/json", key="download_json")
+        # Exportação JSON removida
 
 # ============================================================
 # App principal
