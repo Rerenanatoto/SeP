@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from openpyxl.chart import ScatterChart, RadarChart, Reference, Series
 from openpyxl.utils import get_column_letter
+from lxml import etree as _etree
 
 st.set_page_config(page_title="S&P Methodology + SRI", layout="wide")
 
@@ -386,25 +387,22 @@ def radar(scores: dict):
     vals = [scores[c] for c in cats]
     cats2 = cats + [cats[0]]
     vals2 = vals + [vals[0]]
-    DARK_BLUE_ST = "#1F3864"
+    DB = "#1F3864"
     fig = go.Figure(data=[go.Scatterpolar(
-        r=vals2,
-        theta=cats2,
+        r=vals2, theta=cats2,
         fill="toself",
         name="Scores",
-        line=dict(color=DARK_BLUE_ST, width=2),
+        line=dict(color=DB, width=2),
         fillcolor="rgba(31,56,100,0.15)",
-        marker=dict(color=DARK_BLUE_ST, size=6),
-        mode="lines+markers+text",
-        text=[""] * len(cats2),
+        marker=dict(color=DB, size=6),
     )])
     fig.update_layout(
         polar=dict(
             radialaxis=dict(visible=True, range=[6, 1]),
-            angularaxis=dict(tickfont=dict(size=13, color=DARK_BLUE_ST)),
+            angularaxis=dict(tickfont=dict(size=12, color=DB)),
         ),
         showlegend=False,
-        margin=dict(l=50, r=50, t=50, b=50),
+        margin=dict(l=60, r=60, t=40, b=40),
     )
     return fig
 
@@ -431,28 +429,163 @@ def download_payload():
 
 
 # ============================================================
-# Helpers: exporta .xlsx com graficos nativos openpyxl
+# Helpers: exporta .xlsx com graficos nativos openpyxl + XML
 # ============================================================
 
+_C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+_A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+
 def _sanitize_sheet_name(name: str, existing: list, max_len: int = 28) -> str:
-    """Sanitiza nome de aba Excel; evita duplicatas."""
     safe = re.sub(r"[/\\?*\[\]:\']+", "_", str(name)).strip()[:max_len]
     if not safe:
         safe = "Aux"
     candidate, suffix = safe, 2
     while candidate in existing:
-        candidate = f"{safe[:max_len - 2]}_{suffix}"
+        candidate = f"{safe[:max_len-2]}_{suffix}"
         suffix += 1
     return candidate
 
 
+def _patch_radar_xml(chart_obj, pillar_names, dark_blue="1F3864"):
+    """
+    Manipula o XML do RadarChart diretamente para:
+    1. Inserir nomes dos pilares em cada vértice (via strCache no cat de cada série)
+    2. Remover grades do fundo (majorGridlines)
+    3. Cor azul escuro na linha e marcador
+    4. Sem legenda
+    5. Sem preenchimento (radarStyle=standard)
+    """
+    C = _C_NS
+    A = _A_NS
+
+    root = chart_obj._element  # <c:chartSpace>
+    chart_el   = root.find(f"{{{C}}}chart")
+    plot_area  = chart_el.find(f"{{{C}}}plotArea")
+    radar_el   = plot_area.find(f"{{{C}}}radarChart")
+
+    # 1. radarStyle = standard (sem preenchimento)
+    rs = radar_el.find(f"{{{C}}}radarStyle")
+    if rs is None:
+        rs = _etree.SubElement(radar_el, f"{{{C}}}radarStyle")
+    rs.set("val", "standard")
+
+    # 2. Cada série: cor azul, sem fill, marcador
+    for ser_el in radar_el.findall(f"{{{C}}}ser"):
+        for sp in ser_el.findall(f"{{{C}}}spPr"):
+            ser_el.remove(sp)
+        spPr = _etree.SubElement(ser_el, f"{{{C}}}spPr")
+        _etree.SubElement(spPr, f"{{{A}}}noFill")
+        ln = _etree.SubElement(spPr, f"{{{A}}}ln")
+        ln.set("w", "19050")
+        sf = _etree.SubElement(ln, f"{{{A}}}solidFill")
+        _etree.SubElement(sf, f"{{{A}}}srgbClr").set("val", dark_blue)
+
+        m = ser_el.find(f"{{{C}}}marker")
+        if m is None:
+            m = _etree.SubElement(ser_el, f"{{{C}}}marker")
+        sym = m.find(f"{{{C}}}symbol")
+        if sym is None: sym = _etree.SubElement(m, f"{{{C}}}symbol")
+        sym.set("val", "circle")
+        sz = m.find(f"{{{C}}}size")
+        if sz is None: sz = _etree.SubElement(m, f"{{{C}}}size")
+        sz.set("val", "5")
+        msp = m.find(f"{{{C}}}spPr")
+        if msp is None: msp = _etree.SubElement(m, f"{{{C}}}spPr")
+        for c in list(msp): msp.remove(c)
+        msf = _etree.SubElement(msp, f"{{{A}}}solidFill")
+        _etree.SubElement(msf, f"{{{A}}}srgbClr").set("val", dark_blue)
+        mln = _etree.SubElement(msp, f"{{{A}}}ln")
+        mlnsf = _etree.SubElement(mln, f"{{{A}}}solidFill")
+        _etree.SubElement(mlnsf, f"{{{A}}}srgbClr").set("val", dark_blue)
+
+        # 3. Inserir nomes dos pilares como categorias (strCache literal)
+        old_cat = ser_el.find(f"{{{C}}}cat")
+        if old_cat is not None:
+            ser_el.remove(old_cat)
+        cat_el   = _etree.SubElement(ser_el, f"{{{C}}}cat")
+        strRef   = _etree.SubElement(cat_el, f"{{{C}}}strRef")
+        f_el     = _etree.SubElement(strRef, f"{{{C}}}f")
+        f_el.text = ""
+        cache    = _etree.SubElement(strRef, f"{{{C}}}strCache")
+        pc       = _etree.SubElement(cache, f"{{{C}}}ptCount")
+        pc.set("val", str(len(pillar_names)))
+        for idx, pname in enumerate(pillar_names):
+            pt = _etree.SubElement(cache, f"{{{C}}}pt")
+            pt.set("idx", str(idx))
+            v  = _etree.SubElement(pt, f"{{{C}}}v")
+            v.text = pname
+
+    # 4. Remover grades do fundo
+    for ax in plot_area.findall(f"{{{C}}}radarAx"):
+        for g in ax.findall(f"{{{C}}}majorGridlines"):
+            ax.remove(g)
+        for g in ax.findall(f"{{{C}}}minorGridlines"):
+            ax.remove(g)
+
+    # 5. Sem legenda
+    leg = chart_el.find(f"{{{C}}}legend")
+    if leg is not None:
+        chart_el.remove(leg)
+
+
+def _patch_scatter_xml(chart_obj, min_yr, max_yr):
+    """
+    Manipula XML do ScatterChart para:
+    1. Forçar anos no eixo X (formatCode=0, scaling min/max, majorUnit=1)
+    2. Remover grades de fundo
+    """
+    C = _C_NS
+    A = _A_NS
+
+    root      = chart_obj._element
+    chart_el  = root.find(f"{{{C}}}chart")
+    plot_area = chart_el.find(f"{{{C}}}plotArea")
+
+    val_axes = plot_area.findall(f"{{{C}}}valAx")
+    if not val_axes:
+        return
+    x_ax = val_axes[0]
+
+    # numFmt
+    nf = x_ax.find(f"{{{C}}}numFmt")
+    if nf is None: nf = _etree.SubElement(x_ax, f"{{{C}}}numFmt")
+    nf.set("formatCode", "0")
+    nf.set("sourceLinked", "0")
+
+    # scaling
+    sc_el = x_ax.find(f"{{{C}}}scaling")
+    if sc_el is None: sc_el = _etree.SubElement(x_ax, f"{{{C}}}scaling")
+    ori = sc_el.find(f"{{{C}}}orientation")
+    if ori is None: ori = _etree.SubElement(sc_el, f"{{{C}}}orientation")
+    ori.set("val", "minMax")
+    mn = sc_el.find(f"{{{C}}}min")
+    if mn is None: mn = _etree.SubElement(sc_el, f"{{{C}}}min")
+    mn.set("val", str(float(min_yr)))
+    mx = sc_el.find(f"{{{C}}}max")
+    if mx is None: mx = _etree.SubElement(sc_el, f"{{{C}}}max")
+    mx.set("val", str(float(max_yr)))
+
+    # majorUnit
+    mu = x_ax.find(f"{{{C}}}majorUnit")
+    if mu is None: mu = _etree.SubElement(x_ax, f"{{{C}}}majorUnit")
+    mu.set("val", "1")
+
+    # tickLblPos
+    tlp = x_ax.find(f"{{{C}}}tickLblPos")
+    if tlp is None: tlp = _etree.SubElement(x_ax, f"{{{C}}}tickLblPos")
+    tlp.set("val", "low")
+
+    # Remover grades de todos os eixos
+    for ax in val_axes:
+        for tag in (f"{{{C}}}majorGridlines", f"{{{C}}}minorGridlines"):
+            for g in ax.findall(tag):
+                ax.remove(g)
+
+
 def _build_sri_scatter_charts(wb, df_s, sheet_name: str):
-    """
-    Cria um ScatterChart (lineMarker) por indicador.
-    Usa scaling.min/max + majorUnit para forcar exibicao dos anos no eixo X.
-    """
     cols = list(df_s.columns)
-    if not all(c in cols for c in ["indicator", "country_name", "year_num", "value"]):
+    if not all(c in cols for c in ["indicator","country_name","year_num","value"]):
         return
     indicators = sorted(df_s["indicator"].dropna().unique().tolist())
     if not indicators:
@@ -462,61 +595,44 @@ def _build_sri_scatter_charts(wb, df_s, sheet_name: str):
     if chart_ws_name in wb.sheetnames:
         chart_ws_name = f"Graf_{sheet_name[:10]}"
     chart_ws = wb.create_sheet(chart_ws_name)
-    existing_sheets = list(wb.sheetnames)
+    existing  = list(wb.sheetnames)
     chart_row = 1
 
     for ind in indicators:
-        ind_df = df_s[df_s["indicator"] == ind].dropna(subset=["year_num", "value"])
+        ind_df = df_s[df_s["indicator"]==ind].dropna(subset=["year_num","value"])
         if ind_df.empty:
             continue
         countries    = sorted(ind_df["country_name"].dropna().unique().tolist())
         years_sorted = sorted(ind_df["year_num"].dropna().unique().tolist())
         n_years      = len(years_sorted)
-        n_countries  = len(countries)
         min_yr       = float(years_sorted[0])
         max_yr       = float(years_sorted[-1])
 
-        # Aba auxiliar com nome do indicador
-        aux_name = _sanitize_sheet_name(ind, existing_sheets)
-        existing_sheets.append(aux_name)
+        aux_name = _sanitize_sheet_name(ind, existing)
+        existing.append(aux_name)
         aux = wb.create_sheet(aux_name)
-
         aux.cell(row=1, column=1, value="Ano")
         for ci, country in enumerate(countries, start=2):
             aux.cell(row=1, column=ci, value=country[:28])
         for ri, yr in enumerate(years_sorted, start=2):
             aux.cell(row=ri, column=1, value=int(yr))
             for ci, country in enumerate(countries, start=2):
-                sv = ind_df[
-                    (ind_df["year_num"] == yr) & (ind_df["country_name"] == country)
-                ]["value"]
+                sv = ind_df[(ind_df["year_num"]==yr)&(ind_df["country_name"]==country)]["value"]
                 aux.cell(row=ri, column=ci,
-                         value=round(float(sv.mean()), 4) if not sv.empty else None)
+                         value=round(float(sv.mean()),4) if not sv.empty else None)
 
-        # ScatterChart lineMarker
         sc = ScatterChart()
-        sc.scatterStyle   = "lineMarker"
-        sc.style          = 10
-        sc.title          = ind[:50]
-        sc.y_axis.title   = "Valor"
-        sc.x_axis.title   = "Ano"
-        sc.width          = 22
-        sc.height         = 12
+        sc.scatterStyle = "lineMarker"
+        sc.style        = 10
+        sc.title        = ind[:50]
+        sc.y_axis.title = "Valor"
+        sc.x_axis.title = "Ano"
+        sc.width        = 22
+        sc.height       = 12
 
-        # FORCAR anos no eixo X: scaling explicit + majorUnit=1
-        sc.x_axis.numFmt          = "0"
-        sc.x_axis.tickLblPos      = "low"
-        sc.x_axis.crosses         = "min"
-        sc.x_axis.orientation     = "minMax"
-        sc.x_axis.scaling.min     = min_yr
-        sc.x_axis.scaling.max     = max_yr
-        sc.x_axis.majorUnit       = 1.0
-        sc.x_axis.tickMarkSkip    = 1
-        sc.x_axis.tickLblSkip     = 1
-
-        x_ref = Reference(aux, min_col=1, min_row=2, max_row=n_years + 1)
-        for ci in range(2, n_countries + 2):
-            y_ref  = Reference(aux, min_col=ci, min_row=2, max_row=n_years + 1)
+        x_ref = Reference(aux, min_col=1, min_row=2, max_row=n_years+1)
+        for ci in range(2, len(countries)+2):
+            y_ref  = Reference(aux, min_col=ci, min_row=2, max_row=n_years+1)
             series = Series(y_ref, xvalues=x_ref,
                             title=aux.cell(row=1, column=ci).value)
             series.smooth        = False
@@ -525,16 +641,11 @@ def _build_sri_scatter_charts(wb, df_s, sheet_name: str):
             sc.series.append(series)
 
         chart_ws.add_chart(sc, f"A{chart_row}")
+        _patch_scatter_xml(sc, min_yr, max_yr)   # patch AFTER add_chart
         chart_row += 23
 
 
 def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
-    """
-    Converte {nome_aba: DataFrame} em bytes .xlsx.
-    add_charts=True:
-      - SRI-Dashboards/SRI-Dados -> ScatterCharts por indicador
-      - Metodologia -> RadarChart azul escuro, sem legenda, pilares nos vertices
-    """
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         for sheet_name, df_s in sheets_dict.items():
@@ -546,36 +657,28 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                 safe = sheet_name[:31]
                 cols = list(df_s.columns)
 
-                # METODOLOGIA
                 if safe == "Metodologia" and "Parametro" in cols and "Valor" in cols:
                     ws = wb[safe]
-                    pillar_params = ["Institutional", "Economic", "External",
-                                     "Fiscal", "Monetary"]
+                    pillar_params = ["Institutional","Economic","External","Fiscal","Monetary"]
                     param_col = df_s["Parametro"].tolist()
                     pillar_rows = []
                     for pname in pillar_params:
                         for i, p in enumerate(param_col):
                             if str(p).strip() == pname:
-                                pillar_rows.append(i + 2)
-                                break
+                                pillar_rows.append(i+2); break
 
                     if len(pillar_rows) == 5:
-                        ws["D1"] = "Pilar"
-                        ws["E1"] = "Score"
+                        ws["D1"] = "Pilar"; ws["E1"] = "Score"
                         for ri, (pname, rexcel) in enumerate(
                                 zip(pillar_params, pillar_rows), start=2):
                             ws[f"D{ri}"] = pname
-                            try:
-                                ws[f"E{ri}"] = float(ws[f"B{rexcel}"].value)
-                            except (TypeError, ValueError):
-                                ws[f"E{ri}"] = 0
+                            try:    ws[f"E{ri}"] = float(ws[f"B{rexcel}"].value)
+                            except: ws[f"E{ri}"] = 0
 
                         radar = RadarChart()
                         radar.type  = "standard"
                         radar.style = 10
                         radar.title = "Perfil de Scores - S&P Metodologia"
-                        radar.legend = None
-
                         radar.y_axis.delete      = False
                         radar.y_axis.numFmt      = "0"
                         radar.y_axis.scaling.min = 0
@@ -583,26 +686,13 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                         radar.y_axis.majorUnit   = 1
 
                         data_ref = Reference(ws, min_col=5, min_row=1, max_row=6)
-                        cats_ref = Reference(ws, min_col=4, min_row=2, max_row=6)
                         radar.add_data(data_ref, titles_from_data=True)
-                        radar.set_categories(cats_ref)
-
-                        DARK_BLUE = "1F3864"
-                        s = radar.series[0]
-                        s.graphicalProperties.line.solidFill         = DARK_BLUE
-                        s.graphicalProperties.line.width             = 25000
-                        s.marker.symbol                               = "circle"
-                        s.marker.size                                 = 5
-                        s.marker.graphicalProperties.solidFill       = DARK_BLUE
-                        s.marker.graphicalProperties.line.solidFill  = DARK_BLUE
-
-                        radar.width  = 16
-                        radar.height = 12
+                        radar.width = 16; radar.height = 12
                         ws.add_chart(radar, "D8")
+                        _patch_radar_xml(radar, pillar_params, "1F3864")
 
-                elif safe in ("SRI-Dashboards", "SRI-Dados") and all(
-                    c in cols for c in ["indicator", "country_name", "year_num", "value"]
-                ):
+                elif safe in ("SRI-Dashboards","SRI-Dados") and all(
+                        c in cols for c in ["indicator","country_name","year_num","value"]):
                     _build_sri_scatter_charts(wb, df_s, safe)
 
     buf.seek(0)
@@ -900,17 +990,14 @@ def render_dashboard_tab(df: pd.DataFrame):
     st_dataframe_compat(rating_summary, use_container_width=True, hide_index=True)
 
 
-    # ── Download Excel ──────────────────────────────────────
+    # ── Download Excel ───────────────────────────────────────────────
     st.markdown("---")
-    _dash_df = plot_df.reset_index(drop=True) if 'plot_df' in dir() and not plot_df.empty else df.reset_index(drop=True)
+    _dash_df = plot_df.reset_index(drop=True) if not plot_df.empty else df.reset_index(drop=True)
     _excel_dash = to_excel_bytes({"SRI-Dashboards": _dash_df}, add_charts=True)
-    st.download_button(
-        label="⬇️ Baixar Dashboards (.xlsx com gráficos)",
-        data=_excel_dash,
-        file_name="sri_dashboards.xlsx",
+    st.download_button(label="⬇️ Baixar Dashboards (.xlsx com gráficos)",
+        data=_excel_dash, file_name="sri_dashboards.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_dashboard_xlsx",
-    )
+        key="dl_dashboard_xlsx")
 
 
 def render_table_tab(df: pd.DataFrame):
@@ -941,22 +1028,14 @@ def render_table_tab(df: pd.DataFrame):
     col_dl1, col_dl2 = st.columns(2)
     with col_dl1:
         csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            "⬇️ Baixar CSV",
-            data=csv_data,
-            file_name="bda_filtrado.csv",
-            mime="text/csv",
-            key="dl_table_csv",
-        )
+        st.download_button("⬇️ Baixar CSV", data=csv_data,
+            file_name="bda_filtrado.csv", mime="text/csv", key="dl_table_csv")
     with col_dl2:
         _excel_table = to_excel_bytes({"SRI-Dados": display_df}, add_charts=True)
-        st.download_button(
-            label="⬇️ Baixar Excel (.xlsx com gráficos)",
-            data=_excel_table,
-            file_name="sri_dados.xlsx",
+        st.download_button(label="⬇️ Baixar Excel (.xlsx com gráficos)",
+            data=_excel_table, file_name="sri_dados.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_table_xlsx",
-        )
+            key="dl_table_xlsx")
 
 # ============================================================
 # UI metodologia (agora dentro da 1ª aba)
@@ -964,38 +1043,29 @@ def render_table_tab(df: pd.DataFrame):
 
 def render_methodology_tab():
     st.header("Metodologia")
-    # ── Download Excel com radar ─────────────────────────────────────
     _metod_data = {
-        "Parametro": [
-            "Institutional", "Economic", "External",
-            "Fiscal", "Monetary",
-            "IE Profile", "FP Profile",
-            "Indicative Rating", "Notch Adj.", "LC Uplift",
-            "Final Rating",
-        ],
+        "Parametro": ["Institutional","Economic","External","Fiscal","Monetary",
+                      "IE Profile","FP Profile","Indicative Rating","Notch Adj.","LC Uplift","Final Rating"],
         "Valor": [
-            st.session_state.get("institutional", "---"),
-            st.session_state.get("economic", "---"),
-            st.session_state.get("external", "---"),
-            st.session_state.get("fiscal", "---"),
-            st.session_state.get("monetary", "---"),
-            (st.session_state.get("profiles") or {}).get("Institutional & Economic profile", "---"),
-            (st.session_state.get("profiles") or {}).get("Flexibility & Performance profile", "---"),
-            st.session_state.get("indicative", "---"),
-            st.session_state.get("notch_adj", "---"),
-            st.session_state.get("lc_uplift", "---"),
-            st.session_state.get("final_rating", "---"),
+            st.session_state.get("institutional","---"),
+            st.session_state.get("economic","---"),
+            st.session_state.get("external","---"),
+            st.session_state.get("fiscal","---"),
+            st.session_state.get("monetary","---"),
+            (st.session_state.get("profiles") or {}).get("Institutional & Economic profile","---"),
+            (st.session_state.get("profiles") or {}).get("Flexibility & Performance profile","---"),
+            st.session_state.get("indicative","---"),
+            st.session_state.get("notch_adj","---"),
+            st.session_state.get("lc_uplift","---"),
+            st.session_state.get("final_rating","---"),
         ],
     }
     _df_metod = pd.DataFrame(_metod_data)
     _excel_metod = to_excel_bytes({"Metodologia": _df_metod}, add_charts=True)
-    st.download_button(
-        label="⬇️ Baixar Metodologia (.xlsx com gráfico radar)",
-        data=_excel_metod,
-        file_name="metodologia_sp.xlsx",
+    st.download_button(label="⬇️ Baixar Metodologia (.xlsx com gráfico radar)",
+        data=_excel_metod, file_name="metodologia_sp.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_metod_xlsx",
-    )
+        key="dl_metod_xlsx")
     st.markdown("---")
     method_page = st.radio(
         "Seção da metodologia",
@@ -1504,9 +1574,7 @@ def render_methodology_tab():
         c4.metric("Flexibility & Performance profile (avg)", f"{fp_profile:.2f}")
         st.markdown("---")
         st.subheader("Radar (1=melhor; 6=pior)")
-        _radar_scores = {"Institutional": institutional, "Economic": economic,
-                 "External": external, "Fiscal": fiscal, "Monetary": monetary}
-        fig = radar(_radar_scores)
+        fig = radar({"Institutional": institutional, "Economic": economic, "External": external, "Fiscal": fiscal, "Monetary": monetary})
         st_plotly_chart_compat(fig, use_container_width=True)
         st.markdown("---")
         st.subheader("Indicative rating level & notches")
