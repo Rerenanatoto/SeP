@@ -1509,23 +1509,23 @@ def render_methodology_tab():
 fig = radar(_radar_scores)
 st_plotly_chart_compat(fig, use_container_width=True)
 st.markdown("---")
-    st.subheader("Indicative rating level & notches")
-    img = ASSETS_DIR / "page_06_img_01.png"
-    if img.exists():
-        show_image(img)
-    indicative_upper = indicative_from_matrix(ie_profile, fp_profile)
-    indicative_lower = indicative_upper.lower()
-    st.metric("Indicative rating level", indicative_lower)
-    with st.expander("Override manual (opcional)"):
-        st.selectbox("Indicative rating level (manual override)", RATING_SCALE, index=RATING_SCALE.index(indicative_upper), key="indicative_level_override")
-    base_rating = st.session_state.get("indicative_level_override", indicative_upper)
-    notch_adj = st.selectbox("Ajuste de notches (−1, 0, +1)", [-1, 0, 1], index=1, key="notch_adj")
-    lc_uplift = st.selectbox("Uplift para Local-Currency (0 ou +1)", [0, 1], index=0, key="lc_uplift")
-    final_rating = apply_notches(base_rating, notch_adj, lc_uplift)
-    st.session_state["indicative"] = indicative_lower
-    st.session_state["final_rating"] = final_rating
-    st.metric("Final rating", final_rating)
-    st.write(f"Notch: **{notch_adj:+d}** LC uplift: **+{lc_uplift}**")
+st.subheader("Indicative rating level & notches")
+img = ASSETS_DIR / "page_06_img_01.png"
+if img.exists():
+    show_image(img)
+indicative_upper = indicative_from_matrix(ie_profile, fp_profile)
+indicative_lower = indicative_upper.lower()
+st.metric("Indicative rating level", indicative_lower)
+with st.expander("Override manual (opcional)"):
+    st.selectbox("Indicative rating level (manual override)", RATING_SCALE, index=RATING_SCALE.index(indicative_upper), key="indicative_level_override")
+base_rating = st.session_state.get("indicative_level_override", indicative_upper)
+notch_adj = st.selectbox("Ajuste de notches (−1, 0, +1)", [-1, 0, 1], index=1, key="notch_adj")
+lc_uplift = st.selectbox("Uplift para Local-Currency (0 ou +1)", [0, 1], index=0, key="lc_uplift")
+final_rating = apply_notches(base_rating, notch_adj, lc_uplift)
+st.session_state["indicative"] = indicative_lower
+st.session_state["final_rating"] = final_rating
+st.metric("Final rating", final_rating)
+st.write(f"Notch: **{notch_adj:+d}** LC uplift: **+{lc_uplift}**")
 
 
 # ============================================================
