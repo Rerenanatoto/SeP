@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from openpyxl.chart import ScatterChart, RadarChart, Reference, Series
+from openpyxl.chart import LineChart, RadarChart, Reference, Series
 from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="S&P Methodology + SRI", layout="wide")
@@ -443,12 +443,11 @@ def _sanitize_sheet_name(name: str, existing: list, max_len: int = 28) -> str:
     return candidate
 
 
-def _build_sri_scatter_charts(wb, df_s, sheet_name: str):
+def _build_sri_line_charts(wb, df_s, sheet_name: str):
     """
-    Cria um ScatterChart (lineMarker) por indicador.
-    - Anos no eixo X via scaling.min/max + majorUnit (API openpyxl).
-    - Sem linhas de grade.
-    - Aba auxiliar com nome do indicador.
+    Cria um LineChart por indicador.
+    Anos escritos como TEXTO na coluna 1 → set_categories → aparecem no eixo X.
+    Aba auxiliar nomeada com o nome do indicador.
     """
     cols = list(df_s.columns)
     if not all(c in cols for c in ["indicator", "country_name", "year_num", "value"]):
@@ -471,18 +470,20 @@ def _build_sri_scatter_charts(wb, df_s, sheet_name: str):
         countries    = sorted(ind_df["country_name"].dropna().unique().tolist())
         years_sorted = sorted(ind_df["year_num"].dropna().unique().tolist())
         n_years      = len(years_sorted)
-        min_yr       = float(years_sorted[0])
-        max_yr       = float(years_sorted[-1])
 
-        # Aba auxiliar: nome do indicador (sanitizado)
+        # Aba auxiliar nomeada com o indicador
         aux_name = _sanitize_sheet_name(ind, existing)
         existing.append(aux_name)
         aux = wb.create_sheet(aux_name)
+
+        # Linha 1: cabeçalho  [Ano | País1 | País2 | ...]
         aux.cell(row=1, column=1, value="Ano")
         for ci, country in enumerate(countries, start=2):
             aux.cell(row=1, column=ci, value=country[:28])
+
+        # Linhas 2+: anos como TEXTO (garante exibição como categoria no eixo X)
         for ri, yr in enumerate(years_sorted, start=2):
-            aux.cell(row=ri, column=1, value=int(yr))
+            aux.cell(row=ri, column=1, value=str(int(yr)))   # ← texto!
             for ci, country in enumerate(countries, start=2):
                 sv = ind_df[
                     (ind_df["year_num"] == yr) & (ind_df["country_name"] == country)
@@ -490,42 +491,30 @@ def _build_sri_scatter_charts(wb, df_s, sheet_name: str):
                 aux.cell(row=ri, column=ci,
                          value=round(float(sv.mean()), 4) if not sv.empty else None)
 
-        sc = ScatterChart()
-        sc.scatterStyle = "lineMarker"
-        sc.style        = 10
-        sc.title        = ind[:50]
-        sc.y_axis.title = "Valor"
-        sc.x_axis.title = "Ano"
-        sc.width        = 22
-        sc.height       = 12
+        # LineChart
+        lc = LineChart()
+        lc.style  = 10
+        lc.title  = ind[:50]
+        lc.y_axis.title = "Valor"
+        lc.x_axis.title = "Ano"
+        lc.smooth = False
+        lc.width  = 22
+        lc.height = 12
 
-        # Forçar anos no eixo X — definir ANTES de add_chart
-        sc.x_axis.numFmt          = "0"
-        sc.x_axis.tickLblPos      = "low"
-        sc.x_axis.crosses         = "min"
-        sc.x_axis.orientation     = "minMax"
-        sc.x_axis.scaling.min     = min_yr
-        sc.x_axis.scaling.max     = max_yr
-        sc.x_axis.majorUnit       = 1.0
-        sc.x_axis.tickMarkSkip    = 1
-        sc.x_axis.tickLblSkip     = 1
-        # Remover grades
-        sc.x_axis.majorGridlines  = None
-        sc.x_axis.minorGridlines  = None
-        sc.y_axis.majorGridlines  = None
-        sc.y_axis.minorGridlines  = None
-
-        x_ref = Reference(aux, min_col=1, min_row=2, max_row=n_years + 1)
+        # Séries: uma por país (incluindo cabeçalho na linha 1)
         for ci in range(2, len(countries) + 2):
-            y_ref  = Reference(aux, min_col=ci, min_row=2, max_row=n_years + 1)
-            series = Series(y_ref, xvalues=x_ref,
-                            title=aux.cell(row=1, column=ci).value)
-            series.smooth        = False
-            series.marker.symbol = "circle"
-            series.marker.size   = 4
-            sc.series.append(series)
+            lc.add_data(
+                Reference(aux, min_col=ci, min_row=1, max_row=n_years + 1),
+                titles_from_data=True,
+            )
+        # Categorias = anos-texto → aparecem no eixo X
+        lc.set_categories(Reference(aux, min_col=1, min_row=2, max_row=n_years + 1))
 
-        chart_ws.add_chart(sc, f"A{chart_row}")
+        # Sem linhas de grade
+        lc.x_axis.majorGridlines = None
+        lc.y_axis.majorGridlines = None
+
+        chart_ws.add_chart(lc, f"A{chart_row}")
         chart_row += 23
 
 
@@ -533,10 +522,11 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
     """
     Converte {nome_aba: DataFrame} em bytes .xlsx.
     add_charts=True:
-      - SRI-Dashboards / SRI-Dados → ScatterCharts por indicador
+      - SRI-Dashboards / SRI-Dados → LineCharts por indicador (anos no eixo X)
       - Metodologia → RadarChart azul escuro, pilares nos vértices, sem legenda
     """
-    buf = io.BytesIO()
+    import io as _io
+    buf = _io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         for sheet_name, df_s in sheets_dict.items():
             df_s.to_excel(writer, sheet_name=sheet_name[:31], index=False)
@@ -547,7 +537,8 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                 safe = sheet_name[:31]
                 cols = list(df_s.columns)
 
-                # ── METODOLOGIA ───────────────────────────────────────────────
+                # ── METODOLOGIA: RadarChart ───────────────────────────────────
+                # Nota: chave sem acento "Parametro" (consistente com o DataFrame)
                 if safe == "Metodologia" and "Parametro" in cols and "Valor" in cols:
                     ws = wb[safe]
                     pillar_params = ["Institutional", "Economic", "External",
@@ -561,7 +552,7 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                                 break
 
                     if len(pillar_rows) == 5:
-                        # Colunas auxiliares D (pilar) e E (score)
+                        # Colunas D=nome pilar, E=score
                         ws["D1"] = "Pilar"
                         ws["E1"] = "Score"
                         for ri, (pname, rexcel) in enumerate(
@@ -572,27 +563,26 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                             except (TypeError, ValueError):
                                 ws[f"E{ri}"] = 0
 
-                        # RadarChart: linhas sem preenchimento
                         radar = RadarChart()
-                        radar.type   = "standard"
+                        radar.type   = "standard"    # linhas sem preenchimento
                         radar.style  = 10
                         radar.title  = "Perfil de Scores - S&P Metodologia"
-                        radar.legend = None        # sem legenda
+                        radar.legend = None           # sem legenda
 
-                        # Escala 0-6, números em cada anel
+                        # Escala 0-6, um anel por unidade (números visíveis)
                         radar.y_axis.delete      = False
                         radar.y_axis.numFmt      = "0"
                         radar.y_axis.scaling.min = 0
                         radar.y_axis.scaling.max = 6
                         radar.y_axis.majorUnit   = 1
 
-                        # Dados e categorias (pilares nos vértices)
+                        # Dados (col E, linhas 1-6) e categorias (col D, linhas 2-6)
                         data_ref = Reference(ws, min_col=5, min_row=1, max_row=6)
                         cats_ref = Reference(ws, min_col=4, min_row=2, max_row=6)
                         radar.add_data(data_ref, titles_from_data=True)
                         radar.set_categories(cats_ref)
 
-                        # Cor azul escuro na série
+                        # Cor azul escuro #1F3864
                         if radar.series:
                             s = radar.series[0]
                             s.graphicalProperties.line.solidFill        = "1F3864"
@@ -606,11 +596,11 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                         radar.height = 12
                         ws.add_chart(radar, "D8")
 
-                # ── SRI ───────────────────────────────────────────────────────
+                # ── SRI: LineCharts por indicador ─────────────────────────────
                 elif safe in ("SRI-Dashboards", "SRI-Dados") and all(
                     c in cols for c in ["indicator", "country_name", "year_num", "value"]
                 ):
-                    _build_sri_scatter_charts(wb, df_s, safe)
+                    _build_sri_line_charts(wb, df_s, safe)
 
     buf.seek(0)
     return buf.read()
