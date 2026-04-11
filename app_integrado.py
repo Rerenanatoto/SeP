@@ -421,7 +421,9 @@ def download_payload():
 # ============================================================
 
 def _build_sri_line_charts(wb, df_s, sheet_name: str):
-    """Cria um LineChart nativo por indicador em uma aba 'Gráficos'."""
+    """
+    Cria um LineChart nativo por indicador em uma aba Graficos.
+    """
     cols = list(df_s.columns)
     if not all(c in cols for c in ["indicator", "country_name", "year_num", "value"]):
         return
@@ -429,7 +431,7 @@ def _build_sri_line_charts(wb, df_s, sheet_name: str):
     if not indicators:
         return
 
-    chart_ws_name = "Gráficos"
+    chart_ws_name = "Graficos"
     if chart_ws_name in wb.sheetnames:
         chart_ws_name = f"Graf_{sheet_name[:10]}"
     chart_ws = wb.create_sheet(chart_ws_name)
@@ -443,11 +445,14 @@ def _build_sri_line_charts(wb, df_s, sheet_name: str):
         years_sorted = sorted(ind_df["year_num"].dropna().unique().tolist())
 
         aux_name = f"Aux_{idx_ind}"
+        if aux_name in wb.sheetnames:
+            aux_name = f"Aux_{idx_ind}_x"
         aux = wb.create_sheet(aux_name)
-        aux.sheet_state = "hidden"
+        # Cabeçalho: Ano | País1 | País2 | ...
         aux.cell(row=1, column=1, value="Ano")
         for ci, country in enumerate(countries, start=2):
             aux.cell(row=1, column=ci, value=country[:28])
+        # Dados: uma linha por ano
         for ri, yr in enumerate(years_sorted, start=2):
             aux.cell(row=ri, column=1, value=int(yr))
             for ci, country in enumerate(countries, start=2):
@@ -460,6 +465,7 @@ def _build_sri_line_charts(wb, df_s, sheet_name: str):
         n_years = len(years_sorted)
         n_countries = len(countries)
 
+        # LineChart
         lc = LineChart()
         lc.style = 10
         lc.title = ind[:50]
@@ -468,10 +474,22 @@ def _build_sri_line_charts(wb, df_s, sheet_name: str):
         lc.smooth = False
         lc.width = 22
         lc.height = 12
+
+        # Séries: uma por país (incluindo título na linha 1)
         for ci in range(2, n_countries + 2):
             lc.add_data(Reference(aux, min_col=ci, min_row=1, max_row=n_years + 1),
                         titles_from_data=True)
+
+        # Categorias = anos (inteiros) — col 1, linhas 2..n_years+1
         lc.set_categories(Reference(aux, min_col=1, min_row=2, max_row=n_years + 1))
+
+        # Forçar anos a aparecerem no eixo X
+        lc.x_axis.numFmt = "0"
+        lc.x_axis.tickLblPos = "low"
+        lc.x_axis.crosses = "min"
+        lc.x_axis.auto = True
+        lc.x_axis.lblOffset = 100
+
         chart_ws.add_chart(lc, f"A{chart_row}")
         chart_row += 23
 
@@ -480,8 +498,8 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
     """
     Converte {nome_aba: DataFrame} em bytes .xlsx.
     Se add_charts=True:
-      - SRI-Dashboards / SRI-Dados => LineCharts por indicador
-      - Metodologia => RadarChart dos 5 pilares (sem preenchimento, escala 1-6)
+      - SRI-Dashboards / SRI-Dados -> LineCharts por indicador
+      - Metodologia -> RadarChart linhas sem preenchimento, escala 0-6 com anéis numerados
     """
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -495,17 +513,20 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                 safe_name = sheet_name[:31]
                 cols = list(df_s.columns)
 
+                # ── METODOLOGIA: RadarChart estilo standard (sem fill) ─────────
                 if safe_name == "Metodologia" and "Parâmetro" in cols and "Valor" in cols:
                     ws = wb[safe_name]
                     pillar_params = ["Institutional", "Economic", "External",
                                      "Fiscal", "Monetary"]
                     param_col = df_s["Parâmetro"].tolist()
+
                     pillar_rows = []
                     for pname in pillar_params:
                         for i, p in enumerate(param_col):
                             if str(p).strip() == pname:
                                 pillar_rows.append(i + 2)
                                 break
+
                     if len(pillar_rows) == 5:
                         ws["D1"] = "Pilar"
                         ws["E1"] = "Score"
@@ -518,13 +539,17 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                             except (TypeError, ValueError):
                                 ws[f"E{ri}"] = 0
 
+                        # RadarChart sem preenchimento  — type="standard"
                         radar = RadarChart()
-                        radar.type = "marker"
-                        radar.style = 26
-                        radar.title = "Perfil de Scores - S&P Metodologia"
+                        radar.type = "standard"
+                        radar.style = 10
+                        radar.title = "Perfil de Scores – S&P Metodologia"
+                        # Escala 0-6 com linhas de grade a cada 1 unidade (números visíveis)
+                        radar.y_axis.delete = False
                         radar.y_axis.numFmt = "0"
                         radar.y_axis.scaling.min = 0
                         radar.y_axis.scaling.max = 6
+                        radar.y_axis.majorUnit = 1
 
                         data_ref = Reference(ws, min_col=5, min_row=1, max_row=6)
                         cats_ref = Reference(ws, min_col=4, min_row=2, max_row=6)
@@ -534,6 +559,7 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                         radar.height = 10
                         ws.add_chart(radar, "D8")
 
+                # ── SRI: LineCharts por indicador ─────────────────────────────
                 elif safe_name in ("SRI-Dashboards", "SRI-Dados") and all(
                     c in cols for c in ["indicator", "country_name", "year_num", "value"]
                 ):
@@ -836,13 +862,11 @@ def render_dashboard_tab(df: pd.DataFrame):
 
     # Download Excel com gráficos de linha nativos
     st.markdown("---")
-    _dash_export_df = plot_df.reset_index(drop=True) if not plot_df.empty else df.reset_index(drop=True)
-    excel_bytes_dash = to_excel_bytes(
-        {"SRI-Dashboards": _dash_export_df}, add_charts=True
-    )
+    _dash_df = plot_df.reset_index(drop=True) if not plot_df.empty else df.reset_index(drop=True)
+    _excel_dash = to_excel_bytes({"SRI-Dashboards": _dash_df}, add_charts=True)
     st.download_button(
         label="⬇️ Baixar Dashboards (.xlsx com gráficos de linha)",
-        data=excel_bytes_dash,
+        data=_excel_dash,
         file_name="sri_dashboards.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="dl_dashboard_xlsx",
@@ -885,10 +909,10 @@ def render_table_tab(df: pd.DataFrame):
             key="dl_table_csv",
         )
     with col_dl2:
-        excel_bytes_table = to_excel_bytes({"SRI-Dados": display_df}, add_charts=True)
+        _excel_table = to_excel_bytes({"SRI-Dados": display_df}, add_charts=True)
         st.download_button(
             label="⬇️ Baixar Excel (.xlsx com gráficos de linha)",
-            data=excel_bytes_table,
+            data=_excel_table,
             file_name="sri_dados.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="dl_table_xlsx",
@@ -900,7 +924,7 @@ def render_table_tab(df: pd.DataFrame):
 
 def render_methodology_tab():
     st.header("Metodologia")
-    # Download Excel com gráfico radar (sem preenchimento, escala 1-6)
+    # Download Excel com gráfico radar (linhas sem fill, escala 1-6 com números)
     _metod_data = {
         "Parâmetro": [
             "Institutional", "Economic", "External",
@@ -925,10 +949,10 @@ def render_methodology_tab():
         ],
     }
     _df_metod = pd.DataFrame(_metod_data)
-    _excel_bytes_metod = to_excel_bytes({"Metodologia": _df_metod}, add_charts=True)
+    _excel_metod = to_excel_bytes({"Metodologia": _df_metod}, add_charts=True)
     st.download_button(
         label="⬇️ Baixar Metodologia (.xlsx com gráfico radar)",
-        data=_excel_bytes_metod,
+        data=_excel_metod,
         file_name="metodologia_sp.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="dl_metod_xlsx",
