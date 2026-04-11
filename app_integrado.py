@@ -10,7 +10,6 @@ import plotly.graph_objects as go
 import streamlit as st
 from openpyxl.chart import ScatterChart, RadarChart, Reference, Series
 from openpyxl.utils import get_column_letter
-from lxml import etree as _etree
 
 st.set_page_config(page_title="S&P Methodology + SRI", layout="wide")
 
@@ -431,11 +430,9 @@ def download_payload():
 # ============================================================
 # Helpers: exporta .xlsx com gráficos nativos openpyxl
 # ============================================================
-_C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
-_A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
-
 
 def _sanitize_sheet_name(name: str, existing: list, max_len: int = 28) -> str:
+    """Sanitiza nome de aba Excel; evita duplicatas."""
     safe = re.sub(r'[/\\?*\[\]:\']+', "_", str(name)).strip()[:max_len]
     if not safe:
         safe = "Aux"
@@ -446,78 +443,13 @@ def _sanitize_sheet_name(name: str, existing: list, max_len: int = 28) -> str:
     return candidate
 
 
-def _patch_radar_categories(radar_chart, pillar_names, dark_blue="1F3864"):
-    """
-    Works directly on radar_chart._element = <c:radarChart>.
-    - Injects pillar names as strCache (literal) into each series <c:cat>
-    - Sets line + marker color to dark_blue
-    - Sets radarStyle = standard (no fill)
-    All done before or after add_chart — _element is always available.
-    """
-    C = _C_NS
-    A = _A_NS
-    root = radar_chart._element  # <c:radarChart>
-
-    # radarStyle = standard
-    rs = root.find(f"{{{C}}}radarStyle")
-    if rs is None:
-        rs = _etree.SubElement(root, f"{{{C}}}radarStyle")
-    rs.set("val", "standard")
-
-    for ser_el in root.findall(f"{{{C}}}ser"):
-        # ── series color: azul escuro, no fill ──────────────────────────────
-        for sp in ser_el.findall(f"{{{C}}}spPr"):
-            ser_el.remove(sp)
-        spPr = _etree.SubElement(ser_el, f"{{{C}}}spPr")
-        _etree.SubElement(spPr, f"{{{A}}}noFill")
-        ln = _etree.SubElement(spPr, f"{{{A}}}ln")
-        ln.set("w", "19050")  # 1.5 pt
-        sf = _etree.SubElement(ln, f"{{{A}}}solidFill")
-        _etree.SubElement(sf, f"{{{A}}}srgbClr").set("val", dark_blue)
-
-        # ── marker ──────────────────────────────────────────────────────────
-        m = ser_el.find(f"{{{C}}}marker")
-        if m is None:
-            m = _etree.SubElement(ser_el, f"{{{C}}}marker")
-        sym = m.find(f"{{{C}}}symbol")
-        if sym is None:
-            sym = _etree.SubElement(m, f"{{{C}}}symbol")
-        sym.set("val", "circle")
-        sz = m.find(f"{{{C}}}size")
-        if sz is None:
-            sz = _etree.SubElement(m, f"{{{C}}}size")
-        sz.set("val", "5")
-        msp = m.find(f"{{{C}}}spPr")
-        if msp is None:
-            msp = _etree.SubElement(m, f"{{{C}}}spPr")
-        for ch in list(msp):
-            msp.remove(ch)
-        msf = _etree.SubElement(msp, f"{{{A}}}solidFill")
-        _etree.SubElement(msf, f"{{{A}}}srgbClr").set("val", dark_blue)
-        mln = _etree.SubElement(msp, f"{{{A}}}ln")
-        mlnsf = _etree.SubElement(mln, f"{{{A}}}solidFill")
-        _etree.SubElement(mlnsf, f"{{{A}}}srgbClr").set("val", dark_blue)
-
-        # ── pillar names at radar vertices (strCache) ────────────────────────
-        old_cat = ser_el.find(f"{{{C}}}cat")
-        if old_cat is not None:
-            ser_el.remove(old_cat)
-        cat_el = _etree.SubElement(ser_el, f"{{{C}}}cat")
-        strRef = _etree.SubElement(cat_el, f"{{{C}}}strRef")
-        f_el = _etree.SubElement(strRef, f"{{{C}}}f")
-        f_el.text = ""
-        cache = _etree.SubElement(strRef, f"{{{C}}}strCache")
-        pc = _etree.SubElement(cache, f"{{{C}}}ptCount")
-        pc.set("val", str(len(pillar_names)))
-        for idx, pname in enumerate(pillar_names):
-            pt = _etree.SubElement(cache, f"{{{C}}}pt")
-            pt.set("idx", str(idx))
-            v = _etree.SubElement(pt, f"{{{C}}}v")
-            v.text = pname
-
-
 def _build_sri_scatter_charts(wb, df_s, sheet_name: str):
-    """ScatterChart por indicador. Anos no eixo X via API openpyxl. Sem grades."""
+    """
+    Cria um ScatterChart (lineMarker) por indicador.
+    - Anos no eixo X via scaling.min/max + majorUnit (API openpyxl).
+    - Sem linhas de grade.
+    - Aba auxiliar com nome do indicador.
+    """
     cols = list(df_s.columns)
     if not all(c in cols for c in ["indicator", "country_name", "year_num", "value"]):
         return
@@ -542,7 +474,7 @@ def _build_sri_scatter_charts(wb, df_s, sheet_name: str):
         min_yr       = float(years_sorted[0])
         max_yr       = float(years_sorted[-1])
 
-        # Aba auxiliar nomeada com o indicador
+        # Aba auxiliar: nome do indicador (sanitizado)
         aux_name = _sanitize_sheet_name(ind, existing)
         existing.append(aux_name)
         aux = wb.create_sheet(aux_name)
@@ -567,7 +499,7 @@ def _build_sri_scatter_charts(wb, df_s, sheet_name: str):
         sc.width        = 22
         sc.height       = 12
 
-        # ── Forçar anos no eixo X via API (todas as propriedades ANTES de add_chart)
+        # Forçar anos no eixo X — definir ANTES de add_chart
         sc.x_axis.numFmt          = "0"
         sc.x_axis.tickLblPos      = "low"
         sc.x_axis.crosses         = "min"
@@ -601,8 +533,8 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
     """
     Converte {nome_aba: DataFrame} em bytes .xlsx.
     add_charts=True:
-      - SRI-Dashboards/SRI-Dados -> ScatterCharts (anos no eixo X, sem grades)
-      - Metodologia -> RadarChart azul escuro, pilares nos vértices, sem legenda
+      - SRI-Dashboards / SRI-Dados → ScatterCharts por indicador
+      - Metodologia → RadarChart azul escuro, pilares nos vértices, sem legenda
     """
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -615,6 +547,7 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                 safe = sheet_name[:31]
                 cols = list(df_s.columns)
 
+                # ── METODOLOGIA ───────────────────────────────────────────────
                 if safe == "Metodologia" and "Parametro" in cols and "Valor" in cols:
                     ws = wb[safe]
                     pillar_params = ["Institutional", "Economic", "External",
@@ -628,6 +561,7 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                                 break
 
                     if len(pillar_rows) == 5:
+                        # Colunas auxiliares D (pilar) e E (score)
                         ws["D1"] = "Pilar"
                         ws["E1"] = "Score"
                         for ri, (pname, rexcel) in enumerate(
@@ -638,28 +572,41 @@ def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
                             except (TypeError, ValueError):
                                 ws[f"E{ri}"] = 0
 
+                        # RadarChart: linhas sem preenchimento
                         radar = RadarChart()
                         radar.type   = "standard"
                         radar.style  = 10
                         radar.title  = "Perfil de Scores - S&P Metodologia"
-                        radar.legend = None   # sem legenda
-                        # Escala 0-6 com números em cada anel
+                        radar.legend = None        # sem legenda
+
+                        # Escala 0-6, números em cada anel
                         radar.y_axis.delete      = False
                         radar.y_axis.numFmt      = "0"
                         radar.y_axis.scaling.min = 0
                         radar.y_axis.scaling.max = 6
                         radar.y_axis.majorUnit   = 1
+
+                        # Dados e categorias (pilares nos vértices)
+                        data_ref = Reference(ws, min_col=5, min_row=1, max_row=6)
+                        cats_ref = Reference(ws, min_col=4, min_row=2, max_row=6)
+                        radar.add_data(data_ref, titles_from_data=True)
+                        radar.set_categories(cats_ref)
+
+                        # Cor azul escuro na série
+                        if radar.series:
+                            s = radar.series[0]
+                            s.graphicalProperties.line.solidFill        = "1F3864"
+                            s.graphicalProperties.line.width            = 20000
+                            s.marker.symbol                              = "circle"
+                            s.marker.size                                = 5
+                            s.marker.graphicalProperties.solidFill      = "1F3864"
+                            s.marker.graphicalProperties.line.solidFill = "1F3864"
+
                         radar.width  = 16
                         radar.height = 12
-
-                        data_ref = Reference(ws, min_col=5, min_row=1, max_row=6)
-                        radar.add_data(data_ref, titles_from_data=True)
-
-                        # Patch XML ANTES de add_chart (._element já existe)
-                        _patch_radar_categories(radar, pillar_params, "1F3864")
-
                         ws.add_chart(radar, "D8")
 
+                # ── SRI ───────────────────────────────────────────────────────
                 elif safe in ("SRI-Dashboards", "SRI-Dados") and all(
                     c in cols for c in ["indicator", "country_name", "year_num", "value"]
                 ):
