@@ -1507,7 +1507,7 @@ def render_methodology_tab():
         _radar_scores = {"Institutional": institutional, "Economic": economic,
                  "External": external, "Fiscal": fiscal, "Monetary": monetary}
     fig = radar(_radar_scores)
-        st_plotly_chart_compat(fig, use_container_width=True)
+    st_plotly_chart_compat(fig, use_container_width=True)
         st.markdown("---")
         st.subheader("Indicative rating level & notches")
         img = ASSETS_DIR / "page_06_img_01.png"
