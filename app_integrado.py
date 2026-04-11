@@ -9,9 +9,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import zipfile
+from copy import deepcopy
+from lxml import etree
 from openpyxl import Workbook
 from openpyxl.chart import LineChart, Reference
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.styles import PatternFill, Font
 
 st.set_page_config(page_title="S&P Methodology + SRI", layout="wide")
 
@@ -388,8 +390,7 @@ def radar(scores: dict):
     vals = [scores[c] for c in cats]
     cats2 = cats + [cats[0]]
     vals2 = vals + [vals[0]]
-    fig = go.Figure(data=[go.Scatterpolar(r=vals2, theta=cats2, fill="toself", name="Scores",
-                    line=dict(color="#1F3864"), fillcolor="rgba(31,56,100,0.18)")])
+    fig = go.Figure(data=[go.Scatterpolar(r=vals2, theta=cats2, fill="toself", name="Scores", fillcolor="rgba(31,78,121,0.25)", line=dict(color="#1F4E79", width=2))])
     fig.update_layout(
         polar=dict(radialaxis=dict(visible=True, range=[6, 1])),
         showlegend=False,
@@ -418,132 +419,169 @@ def download_payload():
     }
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
+
 # ============================================================
-# SRI -> Excel export
+# Excel export helpers
 # ============================================================
 
-def _fix_strref_in_zip(buf):
-    out = io.BytesIO()
-    with zipfile.ZipFile(buf, 'r') as zin, \
-         zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zout:
+def _sane_sheet(name: str) -> str:
+    """Sanitize worksheet name to be valid in Excel (max 31 chars)."""
+    invalid = r'\/*?:[]'
+    for ch in invalid:
+        name = name.replace(ch, "_")
+    return name[:31]
+
+
+def _hollow_marker_xml(ser_elem):
+    """
+    Replace the default filled marker with a hollow circle marker for a chart series.
+    Works by directly manipulating the lxml element tree of the chart XML.
+    """
+    nsmap = {
+        "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+        "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    }
+    # Remove any existing marker element
+    for old in ser_elem.findall("c:marker", nsmap):
+        ser_elem.remove(old)
+    # Build <c:marker><c:symbol val="circle"/><c:size val="6"/><c:spPr>...</c:spPr></c:marker>
+    marker_el = etree.SubElement(ser_elem, "{http://schemas.openxmlformats.org/drawingml/2006/chart}marker")
+    sym = etree.SubElement(marker_el, "{http://schemas.openxmlformats.org/drawingml/2006/chart}symbol")
+    sym.set("val", "circle")
+    sz = etree.SubElement(marker_el, "{http://schemas.openxmlformats.org/drawingml/2006/chart}size")
+    sz.set("val", "6")
+    spPr = etree.SubElement(marker_el, "{http://schemas.openxmlformats.org/drawingml/2006/chart}spPr")
+    # Solid line (border) around the marker
+    ln = etree.SubElement(spPr, "{http://schemas.openxmlformats.org/drawingml/2006/main}ln")
+    ln.set("w", "19050")  # 1.5 pt
+    solidFill_ln = etree.SubElement(ln, "{http://schemas.openxmlformats.org/drawingml/2006/main}solidFill")
+    srgbClr_ln = etree.SubElement(solidFill_ln, "{http://schemas.openxmlformats.org/drawingml/2006/main}srgbClr")
+    srgbClr_ln.set("val", "4472C4")
+    # No fill (hollow interior)
+    noFill = etree.SubElement(spPr, "{http://schemas.openxmlformats.org/drawingml/2006/main}noFill")  # noqa: F841
+
+
+def _fix_strref_in_zip(path: str) -> None:
+    """
+    Post-process the xlsx file to:
+      1. Convert numRef → strRef for the category axis (so years show as
+         text labels and not as numeric axis values).
+      2. Apply hollow markers to all chart series.
+    """
+    import zipfile, shutil, os
+    from lxml import etree
+
+    tmp = path + ".tmp"
+    shutil.copy2(path, tmp)
+
+    C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+
+    with zipfile.ZipFile(tmp, "r") as zin, zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
             data = zin.read(item.filename)
-            if item.filename.endswith('.xml') and 'chart' in item.filename.lower():
-                xml = data.decode('utf-8')
-                def _swap(m):
-                    inner = (m.group(1)
-                             .replace('<c:numRef>',    '<c:strRef>')
-                             .replace('</c:numRef>',   '</c:strRef>')
-                             .replace('<c:numCache>',  '<c:strCache>')
-                             .replace('</c:numCache>', '</c:strCache>'))
-                    return '<c:cat>' + inner + '</c:cat>'
-                xml = re.sub(r'<c:cat>(.*?)</c:cat>', _swap, xml, flags=re.DOTALL)
-                data = xml.encode('utf-8')
+            if item.filename.startswith("xl/charts/") and item.filename.endswith(".xml"):
+                tree = etree.fromstring(data)
+                # 1 – Convert numRef → strRef in category axes
+                for numRef in tree.findall(f".//{{{C_NS}}}numRef"):
+                    parent = numRef.getparent()
+                    if parent is not None and parent.tag == f"{{{C_NS}}}cat":
+                        parent.remove(numRef)
+                        strRef = etree.SubElement(parent, f"{{{C_NS}}}strRef")
+                        for child in list(numRef):
+                            strRef.append(deepcopy(child))
+                # 2 – Apply hollow markers to every series
+                for ser in tree.findall(f".//{{{C_NS}}}ser"):
+                    _hollow_marker_xml(ser)
+                data = etree.tostring(tree, xml_declaration=True, encoding="UTF-8", standalone=True)
             zout.writestr(item, data)
-    out.seek(0)
-    return out
+
+    os.remove(tmp)
 
 
-def _sane_sheet(name, used, ml=28):
-    safe = re.sub(r'[/\\?*\[\]:]+', '_', str(name)).strip()[:ml] or 'Sheet'
-    base, n = safe, 2
-    while safe in used:
-        safe = base[:ml-2] + '_' + str(n); n += 1
-    return safe
+def sri_to_excel(df: pd.DataFrame, sheet_name: str) -> bytes:
+    """
+    Build an xlsx workbook from *df* (long-format SRI data filtered for one
+    sheet) with one worksheet per indicator.  Each worksheet contains a
+    line chart (year on X, value on Y, one series per country) with hollow
+    circle markers and year labels as text categories.
+    Returns the workbook as bytes.
+    """
+    import io as _io, tempfile, os
 
-
-def sri_to_excel(df: pd.DataFrame) -> bytes:
-    import math
     wb = Workbook()
-    wb.remove(wb.active)
+    wb.remove(wb.active)  # remove the default empty sheet
 
-    ws_data  = wb.create_sheet('SRI_Dados')
-    hdr_fill = PatternFill('solid', fgColor='1F4E79')
-    hdr_font = Font(bold=True, color='FFFFFF')
-    thin     = Side(style='thin', color='BFBFBF')
-    brd      = Border(left=thin, right=thin, top=thin, bottom=thin)
-    alt      = PatternFill('solid', fgColor='D6E4F0')
-    cols_export = [c for c in
-                   ['sheet', 'country_name', 'country_code', 'lt_fc_rating',
-                    'indicator', 'year', 'year_num', 'value', 'is_forecast']
-                   if c in df.columns]
-    for ci, col in enumerate(cols_export, 1):
-        c = ws_data.cell(1, ci, col)
-        c.font = hdr_font; c.fill = hdr_fill
-        c.alignment = Alignment(horizontal='center', wrap_text=True)
-        c.border = brd
-    for ri, row in enumerate(df[cols_export].itertuples(index=False), 2):
-        fill = alt if ri % 2 == 0 else PatternFill()
-        for ci, val in enumerate(row, 1):
-            v = val if not (isinstance(val, float) and math.isnan(val)) else None
-            c = ws_data.cell(ri, ci, v)
-            c.fill = fill; c.border = brd
-            c.alignment = Alignment(horizontal='center')
-    ws_data.freeze_panes = 'A2'
+    indicators = sorted(df["indicator"].dropna().unique().tolist())
 
-    ws_charts = wb.create_sheet('Graficos')
-    used      = list(wb.sheetnames)
-    chart_row = 1
-    indicators = sorted(df['indicator'].dropna().unique()) if 'indicator' in df.columns else []
     for ind in indicators:
-        df_i = (df[df['indicator'] == ind]
-                .dropna(subset=['year_num', 'value'])
-                .sort_values(['country_name', 'year_num']))
-        if df_i.empty:
+        ind_df = (
+            df[df["indicator"] == ind]
+            .dropna(subset=["year_num", "value"])
+            .sort_values(["year_num", "country_name"])
+        )
+        if ind_df.empty:
             continue
-        countries = sorted(df_i['country_name'].unique().tolist())
-        years     = sorted(df_i['year_num'].unique().tolist())
-        n_yr = len(years); n_ct = len(countries)
 
-        aux_name = _sane_sheet(ind, used); used.append(aux_name)
-        ws = wb.create_sheet(aux_name)
-        ws.cell(1, 1, 'Ano')
-        for ci, ct in enumerate(countries, 2):
-            ws.cell(1, ci, ct)
-        for ri, yr in enumerate(years, 2):
-            ws.cell(ri, 1, str(int(yr)))
-            for ci, ct in enumerate(countries, 2):
-                m = df_i[(df_i['country_name'] == ct) & (df_i['year_num'] == yr)]['value']
-                ws.cell(ri, ci, round(float(m.mean()), 4) if not m.empty else None)
+        ws = wb.create_sheet(title=_sane_sheet(ind))
 
-        lc = LineChart()
-        lc.title        = str(ind)[:45]
-        lc.style        = 10
-        lc.width        = 22
-        lc.height       = 14
-        lc.smooth       = False
+        # Build pivot: rows = years, cols = countries
+        pivot = ind_df.pivot_table(
+            index="year_num", columns="country_name", values="value", aggfunc="mean"
+        ).sort_index()
 
-        for ci in range(2, n_ct + 2):
-            lc.add_data(Reference(ws, min_col=ci, min_row=1, max_row=n_yr + 1),
-                        titles_from_data=True)
-        lc.set_categories(Reference(ws, min_col=1, min_row=2, max_row=n_yr + 1))
+        countries = list(pivot.columns)
+        years = [str(int(y)) for y in pivot.index]  # text years
 
-        # Marcadores: apenas symbol e size — sem graphicalProperties (corrompe o XML)
-        for s in lc.series:
-            s.marker.symbol = 'circle'
-            s.marker.size   = 4
+        # Write header row
+        ws.cell(row=1, column=1, value="Year")
+        for c_idx, country in enumerate(countries, start=2):
+            cell = ws.cell(row=1, column=c_idx, value=country)
+            cell.font = Font(bold=True)
 
-        lc.x_axis.axPos          = 'b'
-        lc.x_axis.delete         = False
-        lc.x_axis.tickLblPos     = 'low'
-        lc.x_axis.majorGridlines = None
-        lc.x_axis.title          = 'Ano'
+        # Write data rows
+        for r_idx, (year, row) in enumerate(zip(years, pivot.itertuples(index=False)), start=2):
+            ws.cell(row=r_idx, column=1, value=year)
+            for c_idx, val in enumerate(row, start=2):
+                ws.cell(row=r_idx, column=c_idx, value=val if pd.notna(val) else None)
 
-        lc.y_axis.axPos          = 'l'
-        lc.y_axis.delete         = False
-        lc.y_axis.tickLblPos     = 'nextTo'
-        lc.y_axis.numFmt         = 'General'
-        lc.y_axis.majorGridlines = None
-        lc.y_axis.title          = 'Valor'
+        n_rows = len(years)
+        n_cols = len(countries)
 
-        ws_charts.add_chart(lc, 'A' + str(chart_row))
-        chart_row += 25
+        if n_rows < 2 or n_cols < 1:
+            continue
 
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    buf = _fix_strref_in_zip(buf)
-    return buf.read()
+        # Create line chart
+        chart = LineChart()
+        chart.title = ind
+        chart.style = 10
+        chart.y_axis.title = "Valor"
+        chart.x_axis.title = "Ano"
+        chart.height = 12
+        chart.width = 22
+
+        # Category reference (years as strings in column A)
+        cats = Reference(ws, min_col=1, min_row=2, max_row=n_rows + 1)
+
+        # Add one series per country
+        for c_idx in range(2, n_cols + 2):
+            data_ref = Reference(ws, min_col=c_idx, min_row=1, max_row=n_rows + 1)
+            chart.add_data(data_ref, titles_from_data=True)
+            chart.set_categories(cats)
+
+        ws.add_chart(chart, f"A{n_rows + 3}")
+
+    # Save to a temp file (hollow-marker post-processing needs a path)
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")
+    os.close(tmp_fd)
+    wb.save(tmp_path)
+
+    # Post-process: strRef + hollow markers
+    _fix_strref_in_zip(tmp_path)
+
+    with open(tmp_path, "rb") as fh:
+        result = fh.read()
+    os.remove(tmp_path)
+    return result
 
 # ============================================================
 # Lógica SRI
@@ -835,14 +873,15 @@ def render_dashboard_tab(df: pd.DataFrame):
     )
     st_dataframe_compat(rating_summary, use_container_width=True, hide_index=True)
 
-
-    st.markdown("---")
+    # ── Excel export (dashboard tab) ──
+    _sri_sheet = sheet_for_charts
+    _xlsx_bytes = sri_to_excel(df[df["sheet"] == _sri_sheet], _sri_sheet)
     st.download_button(
-        "⬇️ Baixar Excel (.xlsx com gráficos de linha)",
-        data=sri_to_excel(df),
-        file_name="sri_dashboard.xlsx",
+        "⬇️ Baixar Excel (gráficos)",
+        data=_xlsx_bytes,
+        file_name=f"{_sane_sheet(_sri_sheet)}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_sri_dash",
+        key=f"dl_excel_dashboard_{_sri_sheet}",
     )
 
 
@@ -872,16 +911,22 @@ def render_table_tab(df: pd.DataFrame):
         )
     st_dataframe_compat(display_df, use_container_width=True, hide_index=True)
     csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
-    _c1, _c2 = st.columns(2)
-    with _c1:
-        st.download_button("⬇️ Baixar CSV", data=csv_data,
-            file_name="bda_filtrado.csv", mime="text/csv", key="dl_csv_tbl")
-    with _c2:
-        st.download_button("⬇️ Baixar Excel (.xlsx com gráficos)",
-            data=sri_to_excel(display_df),
-            file_name="sri_filtrado.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_excel_tbl")
+    st.download_button(
+        "Baixar CSV da visualização atual",
+        data=csv_data,
+        file_name="bda_filtrado.csv",
+        mime="text/csv",
+    )
+
+    _active_sheet = df["sheet"].iloc[0] if not df.empty else "export"
+    _full_xlsx = sri_to_excel(df, _active_sheet)
+    st.download_button(
+        "⬇️ Baixar Excel (gráficos)",
+        data=_full_xlsx,
+        file_name="bda_filtrado.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_excel_table",
+    )
 
 # ============================================================
 # UI metodologia (agora dentro da 1ª aba)
@@ -1402,8 +1447,8 @@ def render_methodology_tab():
         st.subheader("Indicative rating level & notches")
         img = ASSETS_DIR / "page_06_img_01.png"
         if img.exists():
-            _r1, _r2, _r3 = st.columns([0.5, 2, 0.5])
-            with _r2:
+            _rc1, _rc2, _rc3 = st.columns([0.5, 2, 0.5])
+            with _rc2:
                 st.image(str(img), use_container_width=True)
         indicative_upper = indicative_from_matrix(ie_profile, fp_profile)
         indicative_lower = indicative_upper.lower()
