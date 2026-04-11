@@ -811,7 +811,7 @@ def render_methodology_tab():
         key="dl_metod_xlsx",
     )
     st.markdown("---")
-        method_page = st.radio(
+    method_page = st.radio(
         "Seção da metodologia",
         ["Visão geral", "Economic", "Fiscal", "Monetary", "External", "Institutional", "Resultados"],
         horizontal=True,
