@@ -8,6 +8,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from openpyxl.chart import BarChart, LineChart, RadarChart, Reference
+from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="S&P Methodology + SRI", layout="wide")
 
@@ -413,14 +415,323 @@ def download_payload():
     }
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
-def to_excel_bytes(sheets_dict: dict) -> bytes:
-    """Converte um dicionário {nome_aba: DataFrame} em bytes de arquivo .xlsx."""
+
+# ============================================================
+# Helper: gera bytes .xlsx com gráficos nativos openpyxl
+# ============================================================
+
+RATING_ORDER_CONST = [
+    "AAA","AA+","AA","AA-","A+","A","A-",
+    "BBB+","BBB","BBB-","BB+","BB","BB-",
+    "B+","B","B-","CCC+","CCC","CCC-","CC","C","D","SD",
+]
+
+
+def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        for sheet_name, df in sheets_dict.items():
-            safe_name = sheet_name[:31]
-            df.to_excel(writer, sheet_name=safe_name, index=False)
-    return buf.getvalue()
+        for sname, dfs in sheets_dict.items():
+            safe = sname[:31]
+            dfs.to_excel(writer, sheet_name=safe, index=False)
+
+        if add_charts:
+            wb = writer.book
+            for sname, dfs in sheets_dict.items():
+                safe = sname[:31]
+                cols = list(dfs.columns)
+
+                # ── METODOLOGIA: RadarChart dos 5 pilares ─────────────
+                if safe == "Metodologia" and "Parâmetro" in cols and "Valor" in cols:
+                    ws = wb[safe]
+                    pillar_params = ["Institutional","Economic","External","Fiscal","Monetary"]
+                    param_col = dfs["Parâmetro"].tolist()
+                    pillar_rows = []
+                    for pname in pillar_params:
+                        for i, p in enumerate(param_col):
+                            if str(p).strip() == pname:
+                                pillar_rows.append(i + 2)
+                                break
+                    if len(pillar_rows) == 5:
+                        ws["D1"] = "Pilar"
+                        ws["E1"] = "Score"
+                        for ri, (pname, rexcel) in enumerate(zip(pillar_params, pillar_rows), start=2):
+                            ws[f"D{ri}"] = pname
+                            raw = ws[f"B{rexcel}"].value
+                            try:
+                                ws[f"E{ri}"] = float(raw)
+                            except (TypeError, ValueError):
+                                ws[f"E{ri}"] = 0
+                        radar = RadarChart()
+                        radar.type = "filled"
+                        radar.style = 10
+                        radar.title = "Perfil de Scores – S&P Metodologia"
+                        data_r = Reference(ws, min_col=5, min_row=1, max_row=6)
+                        cats_r = Reference(ws, min_col=4, min_row=2, max_row=6)
+                        radar.add_data(data_r, titles_from_data=True)
+                        radar.set_categories(cats_r)
+                        radar.width, radar.height = 14, 10
+                        ws.add_chart(radar, "D8")
+
+                # ── SRI: BarChart dist + BarChart top10 + LineChart ───
+                elif safe in ("SRI-Dashboards", "SRI-Dados") and all(
+                    c in cols for c in ["lt_fc_rating","country_name","indicator","value"]
+                ):
+                    most_freq = dfs["indicator"].value_counts().idxmax()
+                    year_col = "year_num" if "year_num" in cols else None
+
+                    # Aux1 – distribuição de países por rating
+                    rcounts = (
+                        dfs[["country_name","lt_fc_rating"]].drop_duplicates()
+                        .groupby("lt_fc_rating")["country_name"].count().reset_index()
+                        .rename(columns={"country_name":"n"})
+                    )
+                    rcounts["_o"] = rcounts["lt_fc_rating"].apply(
+                        lambda x: RATING_ORDER_CONST.index(x) if x in RATING_ORDER_CONST else 99)
+                    rcounts = rcounts.sort_values("_o").drop(columns="_o")
+                    aux1 = wb.create_sheet("Aux_RatDist")
+                    aux1["A1"], aux1["B1"] = "Rating", "N Países"
+                    for ri, row in enumerate(rcounts.itertuples(), 2):
+                        aux1[f"A{ri}"] = row.lt_fc_rating
+                        aux1[f"B{ri}"] = int(row.n)
+                    nr = len(rcounts)
+                    bar1 = BarChart()
+                    bar1.type = "col"; bar1.style = 10
+                    bar1.title = "Distribuição de Países por LT FC Rating"
+                    bar1.y_axis.title = "Nº de Países"
+                    bar1.x_axis.title = "Rating"
+                    bar1.grouping = "clustered"
+                    bar1.add_data(Reference(aux1, min_col=2, min_row=1, max_row=nr+1),
+                                  titles_from_data=True)
+                    bar1.set_categories(Reference(aux1, min_col=1, min_row=2, max_row=nr+1))
+                    bar1.width, bar1.height = 22, 12
+
+                    # Aux2 – top 10 países
+                    if year_col:
+                        ly = dfs[year_col].dropna().max()
+                        sub = dfs[(dfs["indicator"]==most_freq)&(dfs[year_col]==ly)].dropna(subset=["value"])
+                    else:
+                        sub = dfs[dfs["indicator"]==most_freq].dropna(subset=["value"])
+                    top10 = (sub.groupby("country_name")["value"].mean()
+                             .sort_values(ascending=False).head(10).reset_index())
+                    aux2 = wb.create_sheet("Aux_Top10")
+                    aux2["A1"], aux2["B1"] = "País", f"{most_freq[:28]}"
+                    for ri, row in enumerate(top10.itertuples(), 2):
+                        aux2[f"A{ri}"] = row.country_name
+                        aux2[f"B{ri}"] = round(float(row.value), 4)
+                    nt = len(top10)
+                    bar2 = BarChart()
+                    bar2.type = "bar"; bar2.style = 10
+                    bar2.title = f"Top 10 — {most_freq}"
+                    bar2.x_axis.title = "Valor"; bar2.y_axis.title = "País"
+                    bar2.grouping = "clustered"
+                    bar2.add_data(Reference(aux2, min_col=2, min_row=1, max_row=nt+1),
+                                  titles_from_data=True)
+                    bar2.set_categories(Reference(aux2, min_col=1, min_row=2, max_row=nt+1))
+                    bar2.width, bar2.height = 22, 12
+
+                    # Aux3 – série temporal (LineChart)
+                    line_chart = None
+                    if year_col:
+                        top5 = (dfs[dfs["indicator"]==most_freq].dropna(subset=["value"])
+                                .groupby("country_name")["value"].count()
+                                .sort_values(ascending=False).head(5).index.tolist())
+                        ys = sorted(dfs[year_col].dropna().unique().tolist())
+                        aux3 = wb.create_sheet("Aux_LineSeries")
+                        aux3["A1"] = "Ano"
+                        for ci, ct in enumerate(top5, 2):
+                            aux3.cell(1, ci, ct)
+                        for ri, yr in enumerate(ys, 2):
+                            aux3.cell(ri, 1, int(yr))
+                            for ci, ct in enumerate(top5, 2):
+                                sv = dfs[(dfs["indicator"]==most_freq)&
+                                         (dfs[year_col]==yr)&
+                                         (dfs["country_name"]==ct)]["value"]
+                                aux3.cell(ri, ci,
+                                    round(float(sv.mean()),4) if not sv.empty else None)
+                        ny = len(ys)
+                        nc = len(top5)
+                        line_chart = LineChart()
+                        line_chart.style = 10
+                        line_chart.title = f"Evolução Temporal — {most_freq}"
+                        line_chart.y_axis.title = "Valor"
+                        line_chart.x_axis.title = "Ano"
+                        line_chart.smooth = True
+                        for ci in range(2, nc+2):
+                            line_chart.add_data(
+                                Reference(aux3, min_col=ci, min_row=1, max_row=ny+1),
+                                titles_from_data=True)
+                        line_chart.set_categories(
+                            Reference(aux3, min_col=1, min_row=2, max_row=ny+1))
+                        line_chart.width, line_chart.height = 22, 12
+
+                    # Aba Gráficos
+                    cws_name = "Gráficos"
+                    if cws_name in wb.sheetnames:
+                        cws_name = f"Graf_{safe[:10]}"
+                    cws = wb.create_sheet(cws_name)
+                    cws.add_chart(bar1, "A1")
+                    cws.add_chart(bar2, "A23")
+                    if line_chart is not None:
+                        cws.add_chart(line_chart, "A45")
+
+    buf.seek(0)
+    return buf.read()
+
+
+# ============================================================
+# Gráficos interativos Plotly (para render_dashboard_tab)
+# ============================================================
+
+def chart_rating_distribution(df: pd.DataFrame):
+    st.markdown("#### 📊 Distribuição de países por LT FC rating")
+    if df.empty:
+        st.info("Sem dados para exibir.")
+        return
+    counts = (
+        df[["country_name","lt_fc_rating"]].drop_duplicates()
+        .groupby("lt_fc_rating", as_index=False)["country_name"].count()
+        .rename(columns={"country_name":"n_países"})
+    )
+    counts["_o"] = counts["lt_fc_rating"].apply(
+        lambda x: RATING_ORDER_CONST.index(x) if x in RATING_ORDER_CONST else 99)
+    counts = counts.sort_values("_o").drop(columns="_o")
+    fig = px.bar(
+        counts, x="lt_fc_rating", y="n_países",
+        color="n_países", color_continuous_scale="Blues",
+        labels={"lt_fc_rating":"LT FC Rating","n_países":"Nº de países"},
+        title="Distribuição de países por LT FC Rating", text="n_países",
+    )
+    fig.update_traces(textposition="outside")
+    fig.update_layout(height=420, coloraxis_showscale=False,
+                      margin=dict(l=10,r=10,t=50,b=40))
+    st_plotly_chart_compat(fig)
+
+
+def chart_indicator_heatmap(df: pd.DataFrame):
+    st.markdown("#### 🌡️ Heatmap: Indicador × País × Ano")
+    if df.empty:
+        st.info("Sem dados para exibir.")
+        return
+    indicators = sorted(df["indicator"].dropna().unique().tolist())
+    if not indicators:
+        return
+    sel = st.selectbox("Indicador para o heatmap", indicators, key="heatmap_ind_sel")
+    h = (df[df["indicator"]==sel]
+         .dropna(subset=["year_num","value"])
+         .groupby(["country_name","year_num"], as_index=False)["value"].mean())
+    if h.empty:
+        st.info("Sem dados numéricos.")
+        return
+    pivot = h.pivot(index="country_name", columns="year_num", values="value")
+    fig = px.imshow(
+        pivot, aspect="auto", color_continuous_scale="RdYlGn_r",
+        labels={"color":"Valor","x":"Ano","y":"País"},
+        title=f"Heatmap — {sel}",
+    )
+    fig.update_layout(height=max(350, 22*len(pivot)),
+                      margin=dict(l=160,r=20,t=50,b=40))
+    st_plotly_chart_compat(fig)
+
+
+def chart_indicator_boxplot(df: pd.DataFrame):
+    st.markdown("#### 📦 Box-plot: Distribuição por Rating")
+    if df.empty:
+        st.info("Sem dados para exibir.")
+        return
+    indicators = sorted(df["indicator"].dropna().unique().tolist())
+    if not indicators:
+        return
+    sel = st.selectbox("Indicador para o box-plot", indicators, key="boxplot_ind_sel")
+    sub = df[df["indicator"]==sel].dropna(subset=["value"])
+    if sub.empty:
+        st.info("Sem dados numéricos.")
+        return
+    fig = px.box(
+        sub, x="lt_fc_rating", y="value", color="lt_fc_rating",
+        labels={"lt_fc_rating":"Rating","value":"Valor"},
+        title=f"Box-plot por Rating — {sel}", points="outliers",
+    )
+    fig.update_layout(height=420, showlegend=False,
+                      margin=dict(l=10,r=10,t=50,b=40))
+    st_plotly_chart_compat(fig)
+
+
+def chart_scatter_two_indicators(df: pd.DataFrame):
+    st.markdown("#### 🔵 Scatter: Correlação entre indicadores")
+    if df.empty:
+        st.info("Sem dados para exibir.")
+        return
+    indicators = sorted(df["indicator"].dropna().unique().tolist())
+    if len(indicators) < 2:
+        st.info("São necessários pelo menos 2 indicadores.")
+        return
+    c1, c2 = st.columns(2)
+    with c1:
+        ind_x = st.selectbox("Eixo X", indicators, index=0, key="scatter_x")
+    with c2:
+        ind_y = st.selectbox("Eixo Y", indicators, index=min(1,len(indicators)-1), key="scatter_y")
+
+    def latest(sub):
+        return (sub.sort_values("year_num").dropna(subset=["value"])
+                .groupby("country_name").last().reset_index())
+
+    dx = latest(df[df["indicator"]==ind_x])[["country_name","lt_fc_rating","value"]].rename(columns={"value":ind_x})
+    dy = latest(df[df["indicator"]==ind_y])[["country_name","value"]].rename(columns={"value":ind_y})
+    sdf = dx.merge(dy, on="country_name", how="inner").dropna()
+    if sdf.empty:
+        st.info("Sem dados em comum.")
+        return
+    fig = px.scatter(
+        sdf, x=ind_x, y=ind_y, color="lt_fc_rating",
+        hover_name="country_name",
+        labels={"lt_fc_rating":"Rating"},
+        title=f"Correlação: {ind_x} × {ind_y}", trendline="ols",
+    )
+    fig.update_layout(height=450, margin=dict(l=10,r=10,t=50,b=40))
+    st_plotly_chart_compat(fig)
+
+
+def chart_top_countries_bar(df: pd.DataFrame):
+    st.markdown("#### 🏆 Ranking de países por indicador")
+    if df.empty:
+        st.info("Sem dados para exibir.")
+        return
+    indicators = sorted(df["indicator"].dropna().unique().tolist())
+    years = sorted(df["year_num"].dropna().unique().astype(int).tolist(), reverse=True)
+    if not indicators or not years:
+        return
+    c1, c2, c3 = st.columns([2,1,1])
+    with c1:
+        sel_ind = st.selectbox("Indicador", indicators, key="rank_ind")
+    with c2:
+        sel_yr = st.selectbox("Ano", years, key="rank_yr")
+    with c3:
+        n_top = st.slider("N países", 5, 30, 15, key="rank_n")
+    rdf = (df[(df["indicator"]==sel_ind)&(df["year_num"]==sel_yr)]
+           .dropna(subset=["value"])
+           .groupby("country_name", as_index=False)["value"].mean()
+           .sort_values("value"))
+    if rdf.empty:
+        st.info("Sem dados para essa seleção.")
+        return
+    if len(rdf) > n_top:
+        h = n_top // 2
+        rdf = pd.concat([rdf.head(h), rdf.tail(h)])
+    fig = px.bar(
+        rdf, x="value", y="country_name", orientation="h",
+        color="value", color_continuous_scale="RdYlGn_r",
+        labels={"value":"Valor","country_name":"País"},
+        title=f"Ranking — {sel_ind} ({int(sel_yr)})",
+        text=rdf["value"].round(2),
+    )
+    fig.update_traces(textposition="outside")
+    fig.update_layout(
+        height=max(350, 22*len(rdf)),
+        coloraxis_showscale=False,
+        margin=dict(l=160,r=60,t=50,b=40),
+        yaxis=dict(categoryorder="total ascending"),
+    )
+    st_plotly_chart_compat(fig)
 
 
 # ============================================================
@@ -713,18 +1024,29 @@ def render_dashboard_tab(df: pd.DataFrame):
     )
     st_dataframe_compat(rating_summary, use_container_width=True, hide_index=True)
 
-
-
-    # --- Download Excel ---
+    # ── Gráficos interativos adicionais ───────────────────────────────
     st.markdown("---")
-    excel_bytes = to_excel_bytes({"SRI-Dashboards": df.reset_index(drop=True)})
+    chart_rating_distribution(df)
+    st.markdown("---")
+    with st.expander("📦 Box-plot por rating", expanded=False):
+        chart_indicator_boxplot(df)
+    with st.expander("🌡️ Heatmap indicador × país × ano", expanded=False):
+        chart_indicator_heatmap(df)
+    with st.expander("🔵 Scatter: correlação entre indicadores", expanded=False):
+        chart_scatter_two_indicators(df)
+    with st.expander("🏆 Ranking de países por indicador", expanded=False):
+        chart_top_countries_bar(df)
+    # ── Download Excel com gráficos nativos ───────────────────────────
+    st.markdown("---")
+    excel_bytes_dash = to_excel_bytes({"SRI-Dashboards": df.reset_index(drop=True)}, add_charts=True)
     st.download_button(
-        label="⬇️ Baixar Dashboards (.xlsx)",
-        data=excel_bytes,
+        label="⬇️ Baixar Dashboards (.xlsx com gráficos)",
+        data=excel_bytes_dash,
         file_name="sri_dashboards.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="dl_dashboard_xlsx",
     )
+
 
 def render_table_tab(df: pd.DataFrame):
     st.subheader("Dados em tabela")
@@ -762,9 +1084,9 @@ def render_table_tab(df: pd.DataFrame):
             key="dl_table_csv",
         )
     with col_dl2:
-        excel_bytes_table = to_excel_bytes({"SRI-Dados": display_df})
+        excel_bytes_table = to_excel_bytes({"SRI-Dados": display_df}, add_charts=True)
         st.download_button(
-            label="⬇️ Baixar Excel (.xlsx)",
+            label="⬇️ Baixar Excel (.xlsx com gráficos)",
             data=excel_bytes_table,
             file_name="sri_dados.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -777,35 +1099,37 @@ def render_table_tab(df: pd.DataFrame):
 
 def render_methodology_tab():
     st.header("Metodologia")
-    # --- Download Excel Metodologia ---
-    metod_data = {
+    # ── Download Excel com gráfico radar ─────────────────────
+    _metod_data = {
         "Parâmetro": [
-            "Institutional", "Economic", "External",
-            "Fiscal", "Monetary",
-            "IE Profile", "FP Profile",
-            "Indicative Rating", "Notch Adj.", "LC Uplift",
-            "Final Rating", "Notas",
+            "Institutional","Economic","External",
+            "Fiscal","Monetary",
+            "IE Profile","FP Profile",
+            "Indicative Rating","Notch Adj.","LC Uplift",
+            "Final Rating","Notas",
         ],
         "Valor": [
-            st.session_state.get("institutional", "—"),
-            st.session_state.get("economic", "—"),
-            st.session_state.get("external", "—"),
-            st.session_state.get("fiscal", "—"),
-            st.session_state.get("monetary", "—"),
-            st.session_state.get("profiles", {}).get("ie_profile", "—") if isinstance(st.session_state.get("profiles"), dict) else "—",
-            st.session_state.get("profiles", {}).get("fp_profile", "—") if isinstance(st.session_state.get("profiles"), dict) else "—",
-            st.session_state.get("indicative", "—"),
-            st.session_state.get("notch_adj", "—"),
-            st.session_state.get("lc_uplift", "—"),
-            st.session_state.get("final_rating", "—"),
-            st.session_state.get("notes", ""),
+            st.session_state.get("institutional","—"),
+            st.session_state.get("economic","—"),
+            st.session_state.get("external","—"),
+            st.session_state.get("fiscal","—"),
+            st.session_state.get("monetary","—"),
+            st.session_state.get("profiles",{}).get("Institutional & Economic profile","—")
+                if isinstance(st.session_state.get("profiles"),dict) else "—",
+            st.session_state.get("profiles",{}).get("Flexibility & Performance profile","—")
+                if isinstance(st.session_state.get("profiles"),dict) else "—",
+            st.session_state.get("indicative","—"),
+            st.session_state.get("notch_adj","—"),
+            st.session_state.get("lc_uplift","—"),
+            st.session_state.get("final_rating","—"),
+            st.session_state.get("notes",""),
         ],
     }
-    df_metod = pd.DataFrame(metod_data)
-    excel_bytes_metod = to_excel_bytes({"Metodologia": df_metod})
+    _df_metod = pd.DataFrame(_metod_data)
+    _excel_bytes_metod = to_excel_bytes({"Metodologia": _df_metod}, add_charts=True)
     st.download_button(
-        label="⬇️ Baixar Metodologia (.xlsx)",
-        data=excel_bytes_metod,
+        label="⬇️ Baixar Metodologia (.xlsx com gráfico radar)",
+        data=_excel_bytes_metod,
         file_name="metodologia_sp.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="dl_metod_xlsx",
