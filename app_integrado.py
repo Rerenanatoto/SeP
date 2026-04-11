@@ -1,6 +1,7 @@
 import io
 import json
 import re
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -8,9 +9,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from openpyxl.chart import LineChart, Reference
-from openpyxl.chart.data_source import AxDataSource, StrRef
-from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="S&P Methodology + SRI", layout="wide")
 
@@ -387,21 +385,11 @@ def radar(scores: dict):
     vals = [scores[c] for c in cats]
     cats2 = cats + [cats[0]]
     vals2 = vals + [vals[0]]
-    DB = "#1F3864"
-    fig = go.Figure(data=[go.Scatterpolar(
-        r=vals2, theta=cats2,
-        fill="toself", name="Scores",
-        line=dict(color=DB, width=2),
-        fillcolor="rgba(31,56,100,0.18)",
-        marker=dict(color=DB, size=6),
-    )])
+    fig = go.Figure(data=[go.Scatterpolar(r=vals2, theta=cats2, fill="toself", name="Scores")])
     fig.update_layout(
-        polar=dict(
-            radialaxis=dict(visible=True, range=[6, 1]),
-            angularaxis=dict(tickfont=dict(size=12, color=DB)),
-        ),
+        polar=dict(radialaxis=dict(visible=True, range=[6, 1])),
         showlegend=False,
-        margin=dict(l=60, r=60, t=40, b=40),
+        margin=dict(l=30, r=30, t=30, b=30),
     )
     return fig
 
@@ -426,99 +414,198 @@ def download_payload():
     }
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
-
-# ============================================================
-# SRI Excel export
-# ============================================================
-
-def _fix_cats(chart) -> None:
-    """Replace numRef -> strRef in series categories.
-    Must be called AFTER ws.add_chart(). Confirmed working."""
-    for s in chart.series:
-        if s.cat and s.cat.numRef:
-            s.cat = AxDataSource(strRef=StrRef(f=s.cat.numRef.f))
-
-
-def _sane(name: str, used: list, ml: int = 28) -> str:
-    safe = re.sub(r"[/\\?*\[\]:]+", "_", str(name)).strip()[:ml] or "Sheet"
-    base, n = safe, 2
-    while safe in used:
-        safe = f"{base[:ml-2]}_{n}"; n += 1
-    return safe
-
-
+# ── SRI → Excel ────────────────────────────────────────────────────────────────
 def sri_to_excel(df: pd.DataFrame) -> bytes:
-    """Build .xlsx with:
-    - SRI_Dados: raw data
-    - One visible aux sheet per indicator (Ano x Pais pivot)
-    - Graficos: all LineCharts stacked vertically
-    _fix_cats called AFTER add_chart (confirmed working order).
     """
-    from openpyxl import Workbook
-    import math
-    wb  = Workbook()
-    wb.remove(wb.active)
+    Recebe o dataframe longo do SRI e devolve bytes de um .xlsx com:
+      • uma aba 'Dados' com a tabela pivotada (países × anos)
+      • uma aba 'Gráficos' com um gráfico de linha por indicador
+    """
+    if df.empty:
+        wb = Workbook()
+        return _wb_to_bytes(wb)
 
-    # Raw data sheet
-    ws_data = wb.create_sheet("SRI_Dados")
-    if not df.empty:
-        cols_to_write = list(df.columns)
-        for c, col in enumerate(cols_to_write, 1):
-            ws_data.cell(1, c, col)
-        for r, row in enumerate(df.itertuples(index=False), 2):
-            for c, val in enumerate(row, 1):
-                ws_data.cell(r, c, None if (isinstance(val, float) and math.isnan(val)) else val)
+    wb = Workbook()
+    ws_data    = wb.active
+    ws_data.title = "Dados"
+    ws_charts  = wb.create_sheet("Gráficos")
 
-    # Charts sheet
-    ws_charts = wb.create_sheet("Graficos")
-    used      = list(wb.sheetnames)
-    chart_row = 1
+    # ── cabeçalho estilo ──────────────────────────────────────────────────────
+    hdr_fill   = PatternFill("solid", fgColor="1F4E79")
+    hdr_font   = Font(color="FFFFFF", bold=True)
+    thin_side  = Side(style="thin", color="BFBFBF")
+    thin_brd   = Border(left=thin_side, right=thin_side,
+                        top=thin_side,  bottom=thin_side)
 
-    for sheet_name in sorted(df["sheet"].dropna().unique() if not df.empty else []):
-        df_s = df[df["sheet"] == sheet_name]
-        for ind in sorted(df_s["indicator"].dropna().unique()):
-            df_i = (df_s[df_s["indicator"] == ind]
-                    .dropna(subset=["year_num", "value"])
-                    .sort_values(["country_name", "year_num"]))
-            if df_i.empty:
-                continue
+    # ── construir pivot único (indicador | país | ano → valor) ───────────────
+    if "indicator" not in df.columns:
+        indicators = ["(sem indicador)"]
+        df = df.copy()
+        df["indicator"] = indicators[0]
+    else:
+        indicators = sorted(df["indicator"].dropna().unique().tolist())
 
-            countries = sorted(df_i["country_name"].unique().tolist())
-            years     = sorted(df_i["year_num"].unique().tolist())
-            n_yr, n_ct = len(years), len(countries)
+    row_cursor  = 1        # cursor na aba Dados
+    chart_row   = 1        # cursor na aba Gráficos
 
-            # Visible aux sheet named after indicator
-            aux = _sane(ind, used); used.append(aux)
-            ws  = wb.create_sheet(aux)
-            ws.cell(1, 1, "Ano")
-            for ci, ct in enumerate(countries, 2):
-                ws.cell(1, ci, ct)
-            for ri, yr in enumerate(years, 2):
-                ws.cell(ri, 1, str(int(yr)))   # TEXT year so strRef works
-                for ci, ct in enumerate(countries, 2):
-                    m = df_i[(df_i["country_name"]==ct)&(df_i["year_num"]==yr)]["value"]
-                    ws.cell(ri, ci, round(float(m.mean()),4) if not m.empty else None)
+    for ind in indicators:
+        ind_df = df[df["indicator"] == ind].copy()
+        if ind_df.empty:
+            continue
 
-            # Build LineChart
-            lc = LineChart()
-            lc.title = ind[:45]; lc.style = 10
-            lc.y_axis.title = "Valor"; lc.x_axis.title = "Ano"
-            lc.height = 14;  lc.width = 22
+        # pivot: linhas = países, colunas = anos
+        pivot = (
+            ind_df
+            .pivot_table(
+                index   = "country_name",
+                columns = "year_num",
+                values  = "value",
+                aggfunc = "mean",
+            )
+            .sort_index()
+        )
+        pivot.columns = [int(c) for c in pivot.columns]
+        pivot = pivot.sort_index(axis=1)
 
-            for ci in range(2, n_ct+2):
-                lc.add_data(Reference(ws, min_col=ci, min_row=1, max_row=n_yr+1),
-                            titles_from_data=True)
-            lc.set_categories(Reference(ws, min_col=1, min_row=2, max_row=n_yr+1))
+        countries = pivot.index.tolist()
+        years     = pivot.columns.tolist()
+        n_ctr     = len(countries)
+        n_yr      = len(years)
 
-            # IMPORTANT: add_chart first, then fix categories (confirmed order)
-            ws_charts.add_chart(lc, f"A{chart_row}")
-            _fix_cats(lc)   # numRef -> strRef AFTER add_chart
+        # ── escrever bloco na aba Dados ───────────────────────────────────────
+        # título do indicador
+        ws_data.cell(row_cursor,     1, ind).font      = Font(bold=True, size=12)
+        ws_data.cell(row_cursor,     1, ind).fill      = PatternFill("solid", fgColor="D6E4F0")
+        ws_data.merge_cells(
+            start_row=row_cursor,   start_column=1,
+            end_row  =row_cursor,   end_column  =1+n_yr
+        )
+        row_cursor += 1
 
-            chart_row += 25
+        # cabeçalho linha de anos
+        ws_data.cell(row_cursor, 1, "País / Ano").font = hdr_font
+        ws_data.cell(row_cursor, 1, "País / Ano").fill = hdr_fill
+        ws_data.cell(row_cursor, 1, "País / Ano").alignment = Alignment(horizontal="center")
+        ws_data.cell(row_cursor, 1, "País / Ano").border    = thin_brd
+        for ci, yr in enumerate(years, start=2):
+            c = ws_data.cell(row_cursor, ci, yr)
+            c.font = hdr_font; c.fill = hdr_fill
+            c.alignment = Alignment(horizontal="center")
+            c.border = thin_brd
+        row_cursor += 1
 
+        data_start_row = row_cursor
+
+        # dados
+        for ctr in countries:
+            ws_data.cell(row_cursor, 1, ctr).border = thin_brd
+            for ci, yr in enumerate(years, start=2):
+                val = pivot.loc[ctr, yr] if yr in pivot.columns else None
+                c = ws_data.cell(row_cursor, ci,
+                                 round(float(val), 2) if pd.notna(val) else None)
+                c.border     = thin_brd
+                c.alignment  = Alignment(horizontal="center")
+            row_cursor += 1
+
+        # largura automática coluna A
+        max_len = max((len(str(c)) for c in countries), default=10)
+        ws_data.column_dimensions["A"].width = max(max_len + 2, 18)
+
+        row_cursor += 2   # espaço entre indicadores
+
+        # ── construir gráfico de linhas ───────────────────────────────────────
+        ws = wb.create_sheet(f"_{ind[:28]}")   # aba auxiliar com os dados do gráfico
+        ws.sheet_state = "hidden"
+
+        # anos na col A (linha 1 = cabeçalho, linhas 2..n_yr+1 = anos)
+        ws.cell(1, 1, "Ano")
+        for ri, yr in enumerate(years, start=2):
+            ws.cell(ri, 1, str(yr))          # ← string, não número
+
+        # países nas colunas B, C, …
+        for ci, ctr in enumerate(countries, start=2):
+            ws.cell(1, ci, ctr)
+            for ri, yr in enumerate(years, start=2):
+                val = pivot.loc[ctr, yr] if yr in pivot.columns else None
+                ws.cell(ri, ci, round(float(val), 2) if pd.notna(val) else None)
+
+        lc = LineChart()
+        lc.title         = ind
+        lc.style         = 10
+        lc.y_axis.title  = "Valor"
+        lc.x_axis.title  = "Ano"
+        lc.width         = 25
+        lc.height        = 15
+        lc.grouping      = "standard"
+        lc.smooth        = True
+
+        for ci, ctr in enumerate(countries, start=2):
+            data_ref = Reference(ws, min_col=ci, min_row=1,
+                                 max_row=n_yr+1)
+            series = lc.series.append(
+                __import__("openpyxl.chart.series", fromlist=["Series"]).Series(
+                    data_ref, title_from_data=True
+                )
+            )
+
+        # referência das categorias (anos) — coluna A como texto
+        cat_ref = Reference(ws, min_col=1, min_row=2, max_row=n_yr+1)
+        lc.set_categories(cat_ref)
+
+        # ── TODAS as configurações do eixo ANTES de add_chart ─────────────────
+        lc.x_axis.axPos      = "b"      # eixo na base → rótulos visíveis
+        lc.x_axis.tickLblPos = "low"    # rótulos abaixo do eixo
+        lc.x_axis.delete     = False    # não ocultar eixo
+        lc.y_axis.majorGridlines = None  # sem linhas de grade
+        lc.x_axis.majorGridlines = None  # sem linhas de grade verticais
+
+        ws_charts.add_chart(lc, f"A{chart_row}")
+        chart_row += 30    # espaço entre gráficos
+
+    # ── pós-processamento: trocar numRef → strRef no XML interno ──────────────
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    buf = _fix_strref_in_zip(buf)
+
+    return buf.getvalue()
+
+
+def _fix_strref_in_zip(buf: io.BytesIO) -> io.BytesIO:
+    """
+    Abre o .xlsx como ZIP e, em todos os drawingN/chart*.xml,
+    substitui <c:numRef> por <c:strRef> dentro de <c:cat>.
+    Isso faz os rótulos do eixo X aparecerem como texto (anos).
+    """
+    import re as _re
+    out = io.BytesIO()
+    with zipfile.ZipFile(buf, "r") as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename.endswith(".xml") and "chart" in item.filename.lower():
+                xml_str = data.decode("utf-8")
+                # Dentro de <c:cat>...</c:cat> troca numRef por strRef
+                def _swap(m):
+                    inner = m.group(1)
+                    inner = inner.replace("<c:numRef>", "<c:strRef>")                                  .replace("</c:numRef>", "</c:strRef>")                                  .replace("<c:numCache>", "<c:strCache>")                                  .replace("</c:numCache>", "</c:strCache>")                                  .replace("<c:v>", "<c:v>") 
+                    return f"<c:cat>{inner}</c:cat>"
+                xml_str = _re.sub(
+                    r"<c:cat>(.*?)</c:cat>",
+                    _swap,
+                    xml_str,
+                    flags=_re.DOTALL,
+                )
+                data = xml_str.encode("utf-8")
+            zout.writestr(item, data)
+    out.seek(0)
+    return out
+
+
+def _wb_to_bytes(wb) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+# ── fim sri_to_excel ───────────────────────────────────────────────────────────
 
 
 # ============================================================
@@ -812,18 +899,6 @@ def render_dashboard_tab(df: pd.DataFrame):
     st_dataframe_compat(rating_summary, use_container_width=True, hide_index=True)
 
 
-    # Excel download
-    st.markdown("---")
-    _sri_df = plot_df.reset_index(drop=True) if not plot_df.empty else df
-    st.download_button(
-        "⬇️ Baixar Excel (.xlsx com gráficos de linha)",
-        data=sri_to_excel(_sri_df),
-        file_name="sri_dashboards.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_sri_dash",
-    )
-
-
 def render_table_tab(df: pd.DataFrame):
     st.subheader("Dados em tabela")
     if df.empty:
@@ -850,16 +925,12 @@ def render_table_tab(df: pd.DataFrame):
         )
     st_dataframe_compat(display_df, use_container_width=True, hide_index=True)
     csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
-    _col1, _col2 = st.columns(2)
-    with _col1:
-        st.download_button("⬇️ Baixar CSV", data=csv_data,
-            file_name="bda_filtrado.csv", mime="text/csv", key="dl_csv_tbl")
-    with _col2:
-        st.download_button("⬇️ Baixar Excel",
-            data=sri_to_excel(df),
-            file_name="sri_dados.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_xlsx_tbl")
+    st.download_button(
+        "Baixar CSV da visualização atual",
+        data=csv_data,
+        file_name="bda_filtrado.csv",
+        mime="text/csv",
+    )
 
 # ============================================================
 # UI metodologia (agora dentro da 1ª aba)
@@ -1394,7 +1465,10 @@ def render_methodology_tab():
         st.session_state["final_rating"] = final_rating
         st.metric("Final rating", final_rating)
         st.write(f"Notch: **{notch_adj:+d}** LC uplift: **+{lc_uplift}**")
-
+        st.markdown("---")
+        st.subheader("Exportar inputs")
+        st.text_area("Notas/justificativas (opcional)", key="notes", height=120)
+        st.download_button("Baixar JSON com inputs", data=download_payload(), file_name="sep_inputs.json", mime="application/json", key="download_json")
 
 # ============================================================
 # App principal
@@ -1453,6 +1527,21 @@ def main():
 - **value**: valor numérico convertido para análise.
                     """
                 )
+
+
+    # ── botão de download Excel ───────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Exportar dados para Excel")
+    if not df.empty:
+        excel_bytes = sri_to_excel(filtered if filtered is not None else df)
+        st.download_button(
+            label     = "⬇️ Baixar Excel (.xlsx)",
+            data      = excel_bytes,
+            file_name = "sri_dados.xlsx",
+            mime      = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        st.info("Carregue um arquivo .xlsx para habilitar o download Excel.")
 
 if __name__ == "__main__":
     main()
