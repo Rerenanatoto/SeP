@@ -12,7 +12,6 @@ import zipfile
 from openpyxl import Workbook
 from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-from openpyxl.drawing.fill import ColorChoice
 
 st.set_page_config(page_title="S&P Methodology + SRI", layout="wide")
 
@@ -424,7 +423,6 @@ def download_payload():
 # ============================================================
 
 def _fix_strref_in_zip(buf):
-    # Troca numRef por strRef nos XMLs dos graficos para anos aparecerem no eixo X
     out = io.BytesIO()
     with zipfile.ZipFile(buf, 'r') as zin, \
          zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zout:
@@ -455,12 +453,10 @@ def _sane_sheet(name, used, ml=28):
 
 
 def sri_to_excel(df: pd.DataFrame) -> bytes:
-    # Exporta SRI para .xlsx: SRI_Dados + abas auxiliares (ano x pais) + Graficos
     import math
     wb = Workbook()
     wb.remove(wb.active)
 
-    # -- SRI_Dados: tabela de dados brutos estilizada --
     ws_data  = wb.create_sheet('SRI_Dados')
     hdr_fill = PatternFill('solid', fgColor='1F4E79')
     hdr_font = Font(bold=True, color='FFFFFF')
@@ -485,7 +481,6 @@ def sri_to_excel(df: pd.DataFrame) -> bytes:
             c.alignment = Alignment(horizontal='center')
     ws_data.freeze_panes = 'A2'
 
-    # -- Graficos: um LineChart por indicador, empilhados --
     ws_charts = wb.create_sheet('Graficos')
     used      = list(wb.sheetnames)
     chart_row = 1
@@ -500,19 +495,17 @@ def sri_to_excel(df: pd.DataFrame) -> bytes:
         years     = sorted(df_i['year_num'].unique().tolist())
         n_yr = len(years); n_ct = len(countries)
 
-        # Aba auxiliar: col A = anos (string), cols B+ = paises (uma linha por ano)
         aux_name = _sane_sheet(ind, used); used.append(aux_name)
         ws = wb.create_sheet(aux_name)
         ws.cell(1, 1, 'Ano')
         for ci, ct in enumerate(countries, 2):
             ws.cell(1, ci, ct)
         for ri, yr in enumerate(years, 2):
-            ws.cell(ri, 1, str(int(yr)))  # string -> eixo X correto
+            ws.cell(ri, 1, str(int(yr)))
             for ci, ct in enumerate(countries, 2):
                 m = df_i[(df_i['country_name'] == ct) & (df_i['year_num'] == yr)]['value']
                 ws.cell(ri, ci, round(float(m.mean()), 4) if not m.empty else None)
 
-        # LineChart: add_data por coluna de pais (col B, C, ...) com titles_from_data
         lc = LineChart()
         lc.title        = str(ind)[:45]
         lc.style        = 10
@@ -525,21 +518,20 @@ def sri_to_excel(df: pd.DataFrame) -> bytes:
                         titles_from_data=True)
         lc.set_categories(Reference(ws, min_col=1, min_row=2, max_row=n_yr + 1))
 
-        # Marcadores (bolinhas) em cada ponto da linha
+        # Marcadores (bolinhas sem preenchimento) em cada ponto
         for s in lc.series:
             s.marker.symbol = 'circle'
-            s.marker.size   = 10
-            s.marker.graphicalProperties.solidFill = "FFFFFF"   # branco = aparência de vazio
-            s.marker.graphicalProperties.line.solidFill = "auto" # borda na cor da linha
+            s.marker.size   = 4
+            # hollow marker: borda na cor da serie, sem preenchimento interno
+            s.marker.graphicalProperties.solidFill = 'FFFFFF'
+            s.marker.graphicalProperties.line.solidFill = 'auto'
 
-        # Eixo X: anos visiveis na base
         lc.x_axis.axPos          = 'b'
         lc.x_axis.delete         = False
         lc.x_axis.tickLblPos     = 'low'
         lc.x_axis.majorGridlines = None
         lc.x_axis.title          = 'Ano'
 
-        # Eixo Y: numeros visiveis a esquerda
         lc.y_axis.axPos          = 'l'
         lc.y_axis.delete         = False
         lc.y_axis.tickLblPos     = 'nextTo'
@@ -550,7 +542,6 @@ def sri_to_excel(df: pd.DataFrame) -> bytes:
         ws_charts.add_chart(lc, 'A' + str(chart_row))
         chart_row += 25
 
-    # Salvar e corrigir strRef
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -929,9 +920,7 @@ def render_methodology_tab():
             st.subheader("Matriz de Indicative Rating Levels (Tabela 1)")
             img = ASSETS_DIR / "page_06_img_01.png"
             if img.exists():
-                _ci1, _ci2, _ci3 = st.columns([0.5, 2, 0.5])
-                with _ci2:
-                    st.image(str(img), use_container_width=True)
+                show_image(img)
             else:
                 st.info("Imagem da matriz não encontrada em assets/ (opcional).")
         st.markdown("---")
