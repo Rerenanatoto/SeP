@@ -542,7 +542,7 @@ def sri_to_excel(df: pd.DataFrame) -> bytes:
         # Markers: symbol + size only (no graphicalProperties — corrupts XML)
         for s in lc.series:
             s.marker.symbol = 'circle'
-            s.marker.size   = 4
+            s.marker.size   = 10
 
         # X axis: years visible at bottom
         lc.x_axis.axPos          = 'b'
