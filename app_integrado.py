@@ -8,7 +8,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from openpyxl.chart import LineChart, RadarChart, Reference, Series
+from openpyxl.chart import LineChart, RadarChart, Reference
+from openpyxl.chart.data_source import AxDataSource, StrRef
 from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="S&P Methodology + SRI", layout="wide")
@@ -389,10 +390,9 @@ def radar(scores: dict):
     DB = "#1F3864"
     fig = go.Figure(data=[go.Scatterpolar(
         r=vals2, theta=cats2,
-        fill="toself",
-        name="Scores",
+        fill="toself", name="Scores",
         line=dict(color=DB, width=2),
-        fillcolor="rgba(31,56,100,0.15)",
+        fillcolor="rgba(31,56,100,0.18)",
         marker=dict(color=DB, size=6),
     )])
     fig.update_layout(
@@ -426,184 +426,178 @@ def download_payload():
     }
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
-
 # ============================================================
-# Helpers: exporta .xlsx com gráficos nativos openpyxl
+# Excel export helpers  (openpyxl)
 # ============================================================
 
-def _sanitize_sheet_name(name: str, existing: list, max_len: int = 28) -> str:
-    """Sanitiza nome de aba Excel; evita duplicatas."""
-    safe = re.sub(r'[/\\?*\[\]:\']+', "_", str(name)).strip()[:max_len]
-    if not safe:
-        safe = "Aux"
-    candidate, suffix = safe, 2
-    while candidate in existing:
-        candidate = f"{safe[:max_len-2]}_{suffix}"
-        suffix += 1
-    return candidate
+def _sane_name(name: str, used: list, maxlen: int = 28) -> str:
+    """Sanitize sheet name and avoid duplicates."""
+    safe = re.sub(r"[/\\?*\[\]:]+", "_", str(name)).strip()[:maxlen] or "Sheet"
+    base, n = safe, 2
+    while safe in used:
+        safe = f"{base[:maxlen-2]}_{n}"; n += 1
+    return safe
 
 
-def _build_sri_line_charts(wb, df_s, sheet_name: str):
-    """
-    Cria um LineChart por indicador.
-    Anos escritos como TEXTO na coluna 1 → set_categories → aparecem no eixo X.
-    Aba auxiliar nomeada com o nome do indicador.
-    """
-    cols = list(df_s.columns)
-    if not all(c in cols for c in ["indicator", "country_name", "year_num", "value"]):
+def _fix_cats(chart) -> None:
+    """CRITICAL FIX: openpyxl always emits <c:numRef> for set_categories().
+    Excel then interprets labels as numbers → blank axis.
+    Replace numRef with strRef so text labels appear correctly."""
+    for s in chart.series:
+        if s.cat and s.cat.numRef:
+            s.cat = AxDataSource(strRef=StrRef(f=s.cat.numRef.f))
+
+
+def _sri_line_charts(df: pd.DataFrame, wb) -> None:
+    """One hidden data sheet + one chart sheet per (indicator × sheet)."""
+    if df.empty:
         return
-    indicators = sorted(df_s["indicator"].dropna().unique().tolist())
-    if not indicators:
-        return
-
-    chart_ws_name = "Graficos"
-    if chart_ws_name in wb.sheetnames:
-        chart_ws_name = f"Graf_{sheet_name[:10]}"
-    chart_ws = wb.create_sheet(chart_ws_name)
-    existing = list(wb.sheetnames)
-    chart_row = 1
-
-    for ind in indicators:
-        ind_df = df_s[df_s["indicator"] == ind].dropna(subset=["year_num", "value"])
-        if ind_df.empty:
-            continue
-        countries    = sorted(ind_df["country_name"].dropna().unique().tolist())
-        years_sorted = sorted(ind_df["year_num"].dropna().unique().tolist())
-        n_years      = len(years_sorted)
-
-        # Aba auxiliar nomeada com o indicador
-        aux_name = _sanitize_sheet_name(ind, existing)
-        existing.append(aux_name)
-        aux = wb.create_sheet(aux_name)
-
-        # Linha 1: cabeçalho  [Ano | País1 | País2 | ...]
-        aux.cell(row=1, column=1, value="Ano")
-        for ci, country in enumerate(countries, start=2):
-            aux.cell(row=1, column=ci, value=country[:28])
-
-        # Linhas 2+: anos como TEXTO (garante exibição como categoria no eixo X)
-        for ri, yr in enumerate(years_sorted, start=2):
-            aux.cell(row=ri, column=1, value=str(int(yr)))   # ← texto!
-            for ci, country in enumerate(countries, start=2):
-                sv = ind_df[
-                    (ind_df["year_num"] == yr) & (ind_df["country_name"] == country)
-                ]["value"]
-                aux.cell(row=ri, column=ci,
-                         value=round(float(sv.mean()), 4) if not sv.empty else None)
-
-        # LineChart
-        lc = LineChart()
-        lc.style  = 10
-        lc.title  = ind[:50]
-        lc.y_axis.title = "Valor"
-        lc.x_axis.title = "Ano"
-        lc.smooth = False
-        lc.width  = 22
-        lc.height = 12
-
-        # Séries: uma por país (incluindo cabeçalho na linha 1)
-        for ci in range(2, len(countries) + 2):
-            lc.add_data(
-                Reference(aux, min_col=ci, min_row=1, max_row=n_years + 1),
-                titles_from_data=True,
+    used = list(wb.sheetnames)
+    for sheet_name in df["sheet"].dropna().unique():
+        df_sht = df[df["sheet"] == sheet_name]
+        for ind in sorted(df_sht["indicator"].dropna().unique()):
+            df_ind = (
+                df_sht[df_sht["indicator"] == ind]
+                .dropna(subset=["year_num", "value"])
+                .sort_values(["country_name", "year_num"])
             )
-        # Categorias = anos-texto → aparecem no eixo X
-        lc.set_categories(Reference(aux, min_col=1, min_row=2, max_row=n_years + 1))
+            if df_ind.empty:
+                continue
+            countries    = sorted(df_ind["country_name"].unique())
+            years_sorted = sorted(df_ind["year_num"].unique())
+            n_yr         = len(years_sorted)
+            n_ct         = len(countries)
 
-        # Sem linhas de grade
-        lc.x_axis.majorGridlines = None
-        lc.y_axis.majorGridlines = None
+            # hidden data sheet
+            aux_name = _sane_name(f"_d_{ind}", used)
+            used.append(aux_name)
+            ws = wb.create_sheet(aux_name)
+            ws.sheet_state = "hidden"
+            ws.cell(1, 1, "Ano")
+            for ci, ct in enumerate(countries, 2):
+                ws.cell(1, ci, ct)
+            for ri, yr in enumerate(years_sorted, 2):
+                ws.cell(ri, 1, str(int(yr)))       # TEXT → shows as label
+                for ci, ct in enumerate(countries, 2):
+                    m = df_ind[(df_ind["country_name"] == ct) &
+                               (df_ind["year_num"] == yr)]["value"]
+                    ws.cell(ri, ci, round(float(m.mean()), 4) if not m.empty else None)
 
-        chart_ws.add_chart(lc, f"A{chart_row}")
-        chart_row += 23
+            # line chart
+            lc = LineChart()
+            lc.title = ind[:45]
+            lc.style = 10
+            lc.y_axis.title = "Valor"
+            lc.x_axis.title = "Ano"
+            lc.height = 14; lc.width = 24
+
+            for ci in range(2, n_ct + 2):
+                lc.add_data(
+                    Reference(ws, min_col=ci, min_row=1, max_row=n_yr + 1),
+                    titles_from_data=True,
+                )
+            lc.set_categories(Reference(ws, min_col=1, min_row=2, max_row=n_yr + 1))
+            _fix_cats(lc)   # ← THE FIX: numRef → strRef
+
+            lc.x_axis.majorGridlines = None
+            lc.y_axis.majorGridlines = None
+
+            # chart sheet
+            cs_name = _sane_name(ind[:28], used)
+            used.append(cs_name)
+            from openpyxl import Workbook as _WB
+            cs = wb.create_chartsheet(cs_name)
+            cs.add_chart(lc)
 
 
-def to_excel_bytes(sheets_dict: dict, add_charts: bool = False) -> bytes:
+def to_excel_bytes(
+    scores: dict,
+    profiles: dict,
+    indicative: str,
+    final_rating: str,
+    df_sri: "pd.DataFrame | None" = None,
+) -> bytes:
+    """Return bytes of an .xlsx workbook with:
+      - Metodologia sheet (scores table + radar chart with pillar names)
+      - SRI_Dados sheet + per-indicator LineCharts (if df_sri provided)
     """
-    Converte {nome_aba: DataFrame} em bytes .xlsx.
-    add_charts=True:
-      - SRI-Dashboards / SRI-Dados → LineCharts por indicador (anos no eixo X)
-      - Metodologia → RadarChart azul escuro, pilares nos vértices, sem legenda
-    """
-    import io as _io
-    buf = _io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        for sheet_name, df_s in sheets_dict.items():
-            df_s.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    wb = Workbook()
 
-        if add_charts:
-            wb = writer.book
-            for sheet_name, df_s in sheets_dict.items():
-                safe = sheet_name[:31]
-                cols = list(df_s.columns)
+    # ── Sheet: Metodologia ───────────────────────────────────────────────────
+    ws = wb.active
+    ws.title = "Metodologia"
 
-                # ── METODOLOGIA: RadarChart ───────────────────────────────────
-                # Nota: chave sem acento "Parametro" (consistente com o DataFrame)
-                if safe == "Metodologia" and "Parametro" in cols and "Valor" in cols:
-                    ws = wb[safe]
-                    pillar_params = ["Institutional", "Economic", "External",
-                                     "Fiscal", "Monetary"]
-                    param_col = df_s["Parametro"].tolist()
-                    pillar_rows = []
-                    for pname in pillar_params:
-                        for i, p in enumerate(param_col):
-                            if str(p).strip() == pname:
-                                pillar_rows.append(i + 2)
-                                break
+    PILLARS    = ["Institutional", "Economic", "External", "Fiscal", "Monetary"]
+    PILLARS_LC = [p.lower() for p in PILLARS]
 
-                    if len(pillar_rows) == 5:
-                        # Colunas D=nome pilar, E=score
-                        ws["D1"] = "Pilar"
-                        ws["E1"] = "Score"
-                        for ri, (pname, rexcel) in enumerate(
-                                zip(pillar_params, pillar_rows), start=2):
-                            ws[f"D{ri}"] = pname
-                            try:
-                                ws[f"E{ri}"] = float(ws[f"B{rexcel}"].value)
-                            except (TypeError, ValueError):
-                                ws[f"E{ri}"] = 0
+    # Scores table  A1:B6
+    ws["A1"] = "Pilar";  ws["A1"].font = Font(bold=True)
+    ws["B1"] = "Score";  ws["B1"].font = Font(bold=True)
+    score_vals = []
+    for i, (p, pl) in enumerate(zip(PILLARS, PILLARS_LC), 2):
+        ws.cell(i, 1, p)
+        v = scores.get(pl, scores.get(p, "—"))
+        ws.cell(i, 2, v)
+        try:    score_vals.append(float(v))
+        except: score_vals.append(0.0)
 
-                        radar = RadarChart()
-                        radar.type   = "standard"    # linhas sem preenchimento
-                        radar.style  = 10
-                        radar.title  = "Perfil de Scores - S&P Metodologia"
-                        radar.legend = None           # sem legenda
+    # Profiles / result block  D1:E4
+    ws["D1"] = "Perfil / Resultado";  ws["D1"].font = Font(bold=True)
+    ws["E1"] = "Valor";               ws["E1"].font = Font(bold=True)
+    extra = [
+        ("Institutional & Economic profile",
+            profiles.get("Institutional & Economic profile", "—")),
+        ("Flexibility & Performance profile",
+            profiles.get("Flexibility & Performance profile", "—")),
+        ("Indicative rating level", indicative or "—"),
+        ("Final rating",            final_rating  or "—"),
+    ]
+    for i, (k, v) in enumerate(extra, 2):
+        ws.cell(i, 4, k); ws.cell(i, 5, v)
 
-                        # Escala 0-6, um anel por unidade (números visíveis)
-                        radar.y_axis.delete      = False
-                        radar.y_axis.numFmt      = "0"
-                        radar.y_axis.scaling.min = 0
-                        radar.y_axis.scaling.max = 6
-                        radar.y_axis.majorUnit   = 1
+    # Radar chart data on hidden sheet _R
+    ws_r = wb.create_sheet("_R"); ws_r.sheet_state = "hidden"
+    ws_r["A1"] = "Pilar";  ws_r["A1"].font = Font(bold=True)
+    ws_r["B1"] = "Score";  ws_r["B1"].font = Font(bold=True)
+    for i, (p, v) in enumerate(zip(PILLARS, score_vals), 2):
+        ws_r.cell(i, 1, p)
+        ws_r.cell(i, 2, v)
 
-                        # Dados (col E, linhas 1-6) e categorias (col D, linhas 2-6)
-                        data_ref = Reference(ws, min_col=5, min_row=1, max_row=6)
-                        cats_ref = Reference(ws, min_col=4, min_row=2, max_row=6)
-                        radar.add_data(data_ref, titles_from_data=True)
-                        radar.set_categories(cats_ref)
+    radar = RadarChart()
+    radar.type   = "filled"
+    radar.style  = 26
+    radar.title  = "Perfil de Scores (1 = melhor, 6 = pior)"
+    radar.legend = None
+    radar.y_axis.delete = True
+    radar.height = 14;  radar.width = 20
 
-                        # Cor azul escuro #1F3864
-                        if radar.series:
-                            s = radar.series[0]
-                            s.graphicalProperties.line.solidFill        = "1F3864"
-                            s.graphicalProperties.line.width            = 20000
-                            s.marker.symbol                              = "circle"
-                            s.marker.size                                = 5
-                            s.marker.graphicalProperties.solidFill      = "1F3864"
-                            s.marker.graphicalProperties.line.solidFill = "1F3864"
+    radar.add_data(Reference(ws_r, min_col=2, min_row=1, max_row=6),
+                   titles_from_data=True)
+    radar.set_categories(Reference(ws_r, min_col=1, min_row=2, max_row=6))
+    _fix_cats(radar)    # ← THE FIX: pillar names at radar vertices
 
-                        radar.width  = 16
-                        radar.height = 12
-                        ws.add_chart(radar, "D8")
+    ws.add_chart(radar, "G2")
 
-                # ── SRI: LineCharts por indicador ─────────────────────────────
-                elif safe in ("SRI-Dashboards", "SRI-Dados") and all(
-                    c in cols for c in ["indicator", "country_name", "year_num", "value"]
-                ):
-                    _build_sri_line_charts(wb, df_s, safe)
+    # ── Sheet: SRI_Dados + line charts ───────────────────────────────────────
+    if df_sri is not None and not df_sri.empty:
+        COLS = ["sheet", "country_name", "country_code", "lt_fc_rating",
+                "indicator", "year", "year_num", "is_forecast", "value"]
+        ws_d = wb.create_sheet("SRI_Dados")
+        for c, col in enumerate(COLS, 1):
+            ws_d.cell(1, c, col).font = Font(bold=True)
+        for r, row in enumerate(
+                df_sri[[c for c in COLS if c in df_sri.columns]].itertuples(index=False), 2):
+            for c, val in enumerate(row, 1):
+                ws_d.cell(r, c, val if not (isinstance(val, float) and
+                                             __import__("math").isnan(val)) else None)
 
-    buf.seek(0)
-    return buf.read()
+        _sri_line_charts(df_sri, wb)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 # ============================================================
@@ -896,15 +890,16 @@ def render_dashboard_tab(df: pd.DataFrame):
     )
     st_dataframe_compat(rating_summary, use_container_width=True, hide_index=True)
 
-
-    # ── Download Excel ───────────────────────────────────────────────
-    st.markdown("---")
-    _dash_df = plot_df.reset_index(drop=True) if not plot_df.empty else df.reset_index(drop=True)
-    _excel_dash = to_excel_bytes({"SRI-Dashboards": _dash_df}, add_charts=True)
-    st.download_button(label="⬇️ Baixar Dashboards (.xlsx com gráficos)",
-        data=_excel_dash, file_name="sri_dashboards.xlsx",
+    # ── Excel export ──────────────────────────────────────────────────
+    _sc = {k: st.session_state.get(k, d) for k, d in
+           [("institutional",4),("economic",4),("external",3),("fiscal",4.0),("monetary",3)]}
+    _xls = to_excel_bytes(_sc, st.session_state.get("profiles",{}),
+                          st.session_state.get("indicative",""),
+                          st.session_state.get("final_rating",""), df_sri=df)
+    st.download_button("⬇️ Baixar Excel (dashboards + metodologia)",
+        data=_xls, file_name="sri_dashboard.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_dashboard_xlsx")
+        key="dl_excel_dash")
 
 
 def render_table_tab(df: pd.DataFrame):
@@ -932,17 +927,21 @@ def render_table_tab(df: pd.DataFrame):
             .reset_index()
         )
     st_dataframe_compat(display_df, use_container_width=True, hide_index=True)
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
-        csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
+    csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
+    _c1, _c2 = st.columns(2)
+    with _c1:
         st.download_button("⬇️ Baixar CSV", data=csv_data,
-            file_name="bda_filtrado.csv", mime="text/csv", key="dl_table_csv")
-    with col_dl2:
-        _excel_table = to_excel_bytes({"SRI-Dados": display_df}, add_charts=True)
-        st.download_button(label="⬇️ Baixar Excel (.xlsx com gráficos)",
-            data=_excel_table, file_name="sri_dados.xlsx",
+            file_name="bda_filtrado.csv", mime="text/csv", key="dl_csv_tbl")
+    with _c2:
+        _sc2 = {k: st.session_state.get(k, d) for k, d in
+                [("institutional",4),("economic",4),("external",3),("fiscal",4.0),("monetary",3)]}
+        _xls2 = to_excel_bytes(_sc2, st.session_state.get("profiles",{}),
+                               st.session_state.get("indicative",""),
+                               st.session_state.get("final_rating",""), df_sri=df)
+        st.download_button("⬇️ Baixar Excel", data=_xls2,
+            file_name="bda_filtrado.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_table_xlsx")
+            key="dl_excel_tbl")
 
 # ============================================================
 # UI metodologia (agora dentro da 1ª aba)
@@ -950,30 +949,16 @@ def render_table_tab(df: pd.DataFrame):
 
 def render_methodology_tab():
     st.header("Metodologia")
-    _metod_data = {
-        "Parametro": ["Institutional","Economic","External","Fiscal","Monetary",
-                      "IE Profile","FP Profile","Indicative Rating",
-                      "Notch Adj.","LC Uplift","Final Rating"],
-        "Valor": [
-            st.session_state.get("institutional","---"),
-            st.session_state.get("economic","---"),
-            st.session_state.get("external","---"),
-            st.session_state.get("fiscal","---"),
-            st.session_state.get("monetary","---"),
-            (st.session_state.get("profiles") or {}).get("Institutional & Economic profile","---"),
-            (st.session_state.get("profiles") or {}).get("Flexibility & Performance profile","---"),
-            st.session_state.get("indicative","---"),
-            st.session_state.get("notch_adj","---"),
-            st.session_state.get("lc_uplift","---"),
-            st.session_state.get("final_rating","---"),
-        ],
-    }
-    _df_metod = pd.DataFrame(_metod_data)
-    _excel_metod = to_excel_bytes({"Metodologia": _df_metod}, add_charts=True)
-    st.download_button(label="⬇️ Baixar Metodologia (.xlsx com gráfico radar)",
-        data=_excel_metod, file_name="metodologia_sp.xlsx",
+    # Excel download (scores capturados do session_state)
+    _sc_m = {k: st.session_state.get(k, d) for k, d in
+             [("institutional",4),("economic",4),("external",3),("fiscal",4.0),("monetary",3)]}
+    _xls_m = to_excel_bytes(_sc_m, st.session_state.get("profiles",{}),
+                            st.session_state.get("indicative",""),
+                            st.session_state.get("final_rating",""))
+    st.download_button("⬇️ Baixar Metodologia (.xlsx com radar)",
+        data=_xls_m, file_name="metodologia.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_metod_xlsx")
+        key="dl_excel_met")
     st.markdown("---")
     method_page = st.radio(
         "Seção da metodologia",
