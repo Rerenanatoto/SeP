@@ -1510,7 +1510,7 @@ def render_methodology_tab():
     st_plotly_chart_compat(fig, use_container_width=True)
     st.markdown("---")
     st.subheader("Indicative rating level & notches")
-        img = ASSETS_DIR / "page_06_img_01.png"
+    img = ASSETS_DIR / "page_06_img_01.png"
         if img.exists():
             show_image(img)
         indicative_upper = indicative_from_matrix(ie_profile, fp_profile)
