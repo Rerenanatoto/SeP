@@ -468,8 +468,8 @@ def _sane_sheet(name, used, ml=28):
         safe = base[:ml-2] + '_' + str(n); n += 1
     return safe
 
-
-def sri_to_excel(df: pd.DataFrame) -> bytes:
+@st.cache_data(show_spinner=False)
+def sri_to_excel_cached(df: pd.DataFrame) -> bytes:
     import math
     wb = Workbook()
     wb.remove(wb.active)
@@ -567,7 +567,6 @@ def sri_to_excel(df: pd.DataFrame) -> bytes:
     buf.seek(0)
     buf = _fix_strref_in_zip(buf)
     return buf.read()
-
 # ============================================================
 # Lógica SRI
 # ============================================================
@@ -862,7 +861,7 @@ def render_dashboard_tab(df: pd.DataFrame):
     st.markdown("---")
     st.download_button(
         "⬇️ Baixar Excel (.xlsx com gráficos de linha)",
-        data=sri_to_excel(df),
+        data=sri_to_excel_cached(long_df),
         file_name="sri_dashboard.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="dl_sri_dash",
@@ -874,6 +873,7 @@ def render_table_tab(df: pd.DataFrame):
     if df.empty:
         st.warning("Nenhum dado encontrado com os filtros selecionados.")
         return
+
     view_mode = st.radio(
         "Visualização",
         ["Longa (recomendada)", "Pivotada"],
@@ -881,8 +881,12 @@ def render_table_tab(df: pd.DataFrame):
         index=0,
         key="view_mode",
     )
+
+    # df longo sempre preservado para o Excel
+    long_df = df.sort_values(["sheet", "country_name", "indicator", "year_num"]).copy()
+
     if view_mode == "Longa (recomendada)":
-        display_df = df.sort_values(["sheet", "country_name", "indicator", "year_num"]).copy()
+        display_df = long_df
     else:
         display_df = (
             df.pivot_table(
@@ -893,18 +897,28 @@ def render_table_tab(df: pd.DataFrame):
             )
             .reset_index()
         )
+
     st_dataframe_compat(display_df, use_container_width=True, hide_index=True)
+
     csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
     _c1, _c2 = st.columns(2)
     with _c1:
-        st.download_button("⬇️ Baixar CSV", data=csv_data,
-            file_name="bda_filtrado.csv", mime="text/csv", key="dl_csv_tbl")
+        st.download_button(
+            "⬇️ Baixar CSV",
+            data=csv_data,
+            file_name="bda_filtrado.csv",
+            mime="text/csv",
+            key="dl_csv_tbl",
+        )
     with _c2:
-        st.download_button("⬇️ Baixar Excel (.xlsx com gráficos)",
-            data=sri_to_excel(display_df),
+        # ✅ sempre passa o df longo, independente da view
+        st.download_button(
+            "⬇️ Baixar Excel (.xlsx com gráficos)",
+            data=sri_to_excel(long_df),
             file_name="sri_filtrado.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_excel_tbl")
+            key="dl_excel_tbl",
+        )
 
 # ============================================================
 # UI metodologia (agora dentro da 1ª aba)
